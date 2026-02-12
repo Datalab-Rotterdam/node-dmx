@@ -9,10 +9,14 @@
 export const RDM_START_CODE = 0xcc;
 export const RDM_SUB_START_CODE = 0x01;
 
+/** Smallest legal RDM message length field value (without checksum bytes). */
 export const RDM_MIN_MESSAGE_LENGTH = 24;
+/** Minimum total bytes for a valid RDM frame (message + checksum). */
 export const RDM_MIN_BYTES = 26;
+/** Maximum parameter data length per ANSI E1.20. */
 export const RDM_MAX_PDL = 231;
 
+/** RDM command class values. */
 export enum RdmCommandClass {
     DISCOVERY_COMMAND = 0x10,
     DISCOVERY_COMMAND_RESPONSE = 0x11,
@@ -22,6 +26,7 @@ export enum RdmCommandClass {
     SET_COMMAND_RESPONSE = 0x31,
 }
 
+/** RDM response type values. */
 export enum RdmResponseType {
     ACK = 0x00,
     ACK_TIMER = 0x01,
@@ -29,6 +34,7 @@ export enum RdmResponseType {
     ACK_OVERFLOW = 0x03,
 }
 
+/** Commonly used Parameter IDs (PIDs). */
 export const PIDS = {
     DISC_UNIQUE_BRANCH: 0x0001,
     DISC_MUTE: 0x0002,

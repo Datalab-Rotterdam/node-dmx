@@ -7,9 +7,12 @@
  *   https://art-net.org.uk/downloads/art-net.pdf
  */
 export const ARTNET_PORT = 6454;
+/** Art-Net packet id (8-byte ASCII signature). */
 export const ARTNET_ID = 'Art-Net\u0000';
+/** Protocol version used by this implementation. */
 export const ARTNET_PROTOCOL_VERSION = 14;
 
+/** Art-Net operation codes (little-endian on wire). */
 export enum OpCode {
     OpPoll = 0x2000,
     OpPollReply = 0x2100,
@@ -40,6 +43,7 @@ export enum OpCode {
     OpMacSlave = 0xf100,
 }
 
+/** Diagnostic priority values used by OpPoll and OpDiagData. */
 export enum DiagnosticsPriority {
     Low = 0x10,
     Med = 0x40,
@@ -48,6 +52,7 @@ export enum DiagnosticsPriority {
     Volatile = 0xf0,
 }
 
+/** Node style codes advertised in ArtPollReply. */
 export enum NodeStyle {
     StNode = 0x00,
     StController = 0x01,

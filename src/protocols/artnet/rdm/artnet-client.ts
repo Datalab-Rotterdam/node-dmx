@@ -16,16 +16,25 @@ import type {RdmRequest, RdmResponse} from './types';
 import type {UID} from './uid';
 
 export type ArtNetRdmClientOptions = {
+    /** Target Art-Net node IP/hostname. */
     host: string;
+    /** Optional local bind address. */
     bindAddress?: string;
+    /** UDP destination port (defaults to Art-Net 6454). */
     port?: number;
+    /** Default receive timeout in milliseconds. */
     timeoutMs?: number;
 };
 
+/** Minimal client for ToD and single-request RDM transactions over Art-Net. */
 export class ArtNetRdmClient {
     private readonly socket: Socket;
     private readonly options: ArtNetRdmClientOptions;
 
+    /**
+     * Create an Art-Net RDM client.
+     * @param options Socket and timeout options.
+     */
     constructor(options: ArtNetRdmClientOptions) {
         this.options = options;
         this.socket = createSocket('udp4');

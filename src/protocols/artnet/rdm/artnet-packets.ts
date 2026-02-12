@@ -14,38 +14,55 @@ import type {UID} from './uid';
 import {uidFromBuffer} from './uid';
 
 export type ArtTodRequestOptions = {
+    /** 1-based universe number. */
     universe: number;
+    /** ToD command (implementation-specific; usually 0x00). */
     command?: number;
+    /** Optional explicit list of Port-Address values to query. */
     portAddresses?: number[];
 };
 
 export type ArtTodControlOptions = {
+    /** 1-based universe number. */
     universe: number;
+    /** ToD control command byte. */
     command?: number;
 };
 
 export type ArtTodData = {
+    /** Reconstructed 1-based universe number. */
     universe: number;
+    /** Art-Net Net field. */
     net: number;
+    /** Sub-Uni address byte. */
     address: number;
+    /** Total UID count reported by node. */
     uidTotal: number;
+    /** Block index for segmented responses. */
     blockCount: number;
+    /** Number of UIDs in this packet block. */
     uidCount: number;
+    /** Parsed UID entries. */
     uids: UID[];
 };
 
 export type ArtRdmPacket = {
+    /** 1-based universe number. */
     universe: number;
+    /** RDM command field for OpRdm wrapper. */
     command?: number;
+    /** Inner RDM packet bytes (without Art-Net header). */
     rdmPacket: Buffer;
 };
 
+/** Write common Art-Net header fields into a packet buffer. */
 const writeHeader = (buffer: Buffer, opcode: OpCode): void => {
     buffer.write(ARTNET_ID, 0, 'ascii');
     buffer.writeUInt16LE(opcode, 8);
     buffer.writeUInt16BE(ARTNET_PROTOCOL_VERSION, 10);
 };
 
+/** Build OpTodRequest packet. */
 export const buildArtTodRequest = (options: ArtTodRequestOptions): Buffer => {
     const address = splitUniverseAddress(options.universe);
     const portAddresses = options.portAddresses ?? [address.subUni];
@@ -65,6 +82,7 @@ export const buildArtTodRequest = (options: ArtTodRequestOptions): Buffer => {
     return buffer;
 };
 
+/** Build OpTodControl packet. */
 export const buildArtTodControl = (options: ArtTodControlOptions): Buffer => {
     const address = splitUniverseAddress(options.universe);
     const buffer = Buffer.alloc(19);
@@ -79,6 +97,7 @@ export const buildArtTodControl = (options: ArtTodControlOptions): Buffer => {
     return buffer;
 };
 
+/** Build OpRdm wrapper packet with embedded RDM payload. */
 export const buildArtRdm = (options: ArtRdmPacket): Buffer => {
     const address = splitUniverseAddress(options.universe);
     const rdmPacket = options.rdmPacket;
@@ -100,6 +119,10 @@ export const buildArtRdm = (options: ArtRdmPacket): Buffer => {
     return buffer;
 };
 
+/**
+ * Parse OpTodData into strongly-typed fields.
+ * @returns Parsed data or `null` when payload is not OpTodData.
+ */
 export const parseArtTodData = (buffer: Buffer): ArtTodData | null => {
     if (buffer.length < 24) return null;
     const id = buffer.toString('ascii', 0, 8);

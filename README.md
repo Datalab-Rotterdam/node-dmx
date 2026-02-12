@@ -1,44 +1,44 @@
-# node-dmx
+# node-dmx 🎛️
 
-Network DMX library for Node.js (TypeScript). It supports:
+`node-dmx` is a TypeScript library for controlling DMX over IP from Node.js.
+
+It supports:
 - sACN (E1.31)
 - Art-Net 4
 - RDM over Art-Net
 - A fixture plugin system
 
-This README is written so students can get a device running quickly and understand the basics.
+This guide is written for students and first-time users: start simple, then move to advanced features.
 
-**What you need**
-- Node.js 18 or newer
-- A DMX-over-IP device that supports sACN or Art-Net
-- Your computer and the device on the same network
+## Requirements
+- Node.js 18+
+- A DMX-over-IP device (sACN or Art-Net)
+- Computer and lighting device on the same network
 
 ## Install
 ```bash
 npm install node-dmx
 ```
 
-## How DMX Works (30 seconds)
-- A DMX **universe** is 512 channels.
-- A **channel** value is 0 to 255.
-- You update channels and then **flush** to send the frame.
+## DMX Basics (Quick)
+- A **universe** has 512 channels.
+- A **channel value** is 0-255.
+- You set values in memory, then call `flush()` to send them.
 
-## Quick Start (sACN)
-Best for modern devices and multicast networks.
+## 1. Quick Start (sACN)
 ```ts
 import {DMXController} from 'node-dmx';
 
 const controller = new DMXController({protocol: 'sacn'});
-
 const universe = controller.addUniverse(1);
-universe.setChannel(1, 255); // channel 1 to full
+
+universe.setChannel(1, 255); // channel 1 at full
 
 await controller.flush();
 controller.close();
 ```
 
-## Quick Start (Art-Net)
-Common in lighting networks and older devices.
+## 2. Quick Start (Art-Net)
 ```ts
 import {DMXController} from 'node-dmx';
 
@@ -46,19 +46,31 @@ const controller = new DMXController({
   protocol: 'artnet',
   artSync: true,
   artnet: {
-    host: '255.255.255.255', // broadcast
+    host: '255.255.255.255',
     broadcast: true,
   },
 });
 
-const universe = controller.addUniverse(1);
-universe.setChannel(1, 255);
-
+controller.setChannel(1, 1, 255); // universe 1, channel 1, full
 await controller.flush();
 controller.close();
 ```
 
-## Find Art-Net Devices (Discovery)
+## 3. Working With Multiple Universes
+```ts
+import {DMXController} from 'node-dmx';
+
+const controller = new DMXController({protocol: 'sacn'});
+const u1 = controller.addUniverse(1);
+const u2 = controller.addUniverse(2);
+
+u1.setChannel(1, 255);
+u2.setChannel(1, 128);
+
+await controller.flush(); // sends all dirty universes
+```
+
+## 4. Device Discovery (Art-Net)
 ```ts
 import {ArtNetDiscovery} from 'node-dmx';
 
@@ -72,14 +84,13 @@ for (const node of replies) {
 discovery.close();
 ```
 
-## RDM over Art-Net
-RDM lets you query devices for information and change settings.
+## 5. RDM Over Art-Net
 ```ts
 import {ArtNetRdmClient, RdmCommandClass, PIDS} from 'node-dmx';
 
-const rdm = new ArtNetRdmClient({host: '192.168.0.10'});
+const client = new ArtNetRdmClient({host: '192.168.0.10'});
 
-const response = await rdm.rdmTransaction(1, {
+const response = await client.rdmTransaction(1, {
   destinationUid: {manufacturerId: 0x7a70, deviceId: 0x00000001},
   sourceUid: {manufacturerId: 0x7a70, deviceId: 0x00000002},
   transactionNumber: 1,
@@ -90,11 +101,10 @@ const response = await rdm.rdmTransaction(1, {
 });
 
 console.log(response);
-rdm.close();
+client.close();
 ```
 
-## Fixtures (Higher-Level Control)
-Fixtures let you work with named channels like `r`, `g`, `b`, `dimmer`.
+## 6. Fixtures (Higher-Level API)
 ```ts
 import {DMXController, Fixture, RGBDimmerFixture} from 'node-dmx';
 
@@ -104,43 +114,72 @@ controller.addUniverse(1);
 const fixture = new Fixture(
   controller,
   RGBDimmerFixture,
-  1,         // universe
-  1,         // start address
-  'default', // personality id
+  1,     // universe
+  1,     // start address
+  '4ch', // personality id
 );
 
-fixture.set({r: 255, g: 64, b: 32, dimmer: 255});
+// RGBDimmerFixture expects state with `dimmer` and `rgb` array values in range 0..1
+fixture.set({dimmer: 1, rgb: [1, 0.25, 0.1]});
 fixture.render();
 
 await controller.flush();
 ```
 
-## Examples (Runnable)
-Examples are included in `examples/`:
+## 7. Runnable Examples
+All examples live in `examples/`.
+
+Core examples:
+- `examples/sacn-basic.ts`
 - `examples/sacn-animate.ts`
+- `examples/sacn-rainbow.ts`
 - `examples/artnet-animate.ts`
 - `examples/artnet-discover.ts`
 - `examples/rdm-tod.ts`
 
-Run one:
+Additional animation examples:
+- `examples/sacn-comet-chase.ts`
+- `examples/sacn-fire-flicker.ts`
+- `examples/sacn-police-strobe.ts`
+- `examples/sacn-breathing-pastels.ts`
+- `examples/sacn-color-wipe.ts`
+- `examples/sacn-sparkle.ts`
+- `examples/sacn-theater-chase.ts`
+- `examples/sacn-aurora.ts`
+- `examples/sacn-pulse-stack.ts`
+- `examples/sacn-storm.ts`
+- `examples/sacn-halloween.ts`
+- `examples/sacn-christmas.ts`
+
+Run an example:
 ```bash
-npx tsx examples/sacn-animate.ts
+npm run example/sacn-rainbow
 ```
 
-## API Documentation (TypeDoc)
-This project uses TypeDoc. The README is used as the landing page.
+## 8. Common Options
+Useful options for `DMXController`:
+- `protocol`: `'sacn' | 'artnet'`
+- `iface`: local interface IPv4 address
+- `reuseAddr`: allow multiple listeners/senders on same UDP port
+- `unicastDestination`: send unicast instead of multicast/broadcast
+- `artSync`: send ArtSync after flush (Art-Net)
+
+## 9. TypeDoc
+TypeDoc output uses `README.md` as the landing page.
 
 Build docs:
 ```bash
 npm run docs:build
 ```
 
-Output goes to `generated/docs`.
+Output:
+- `generated/docs`
 
 ## Troubleshooting
-- Make sure your computer and device are on the same network.
-- If nothing responds, try unicast by setting `artnet.host` or the sACN unicast destination.
-- Some devices use a different universe numbering. Try universe 0 or 1 if unsure.
+- Verify your interface IP (`iface`) is on the same subnet as the fixture.
+- If multicast does not work on your network, use unicast.
+- Try universe numbering differences (some devices start at 0, most at 1).
+- For Art-Net broadcast, ensure network allows UDP broadcasts.
 
 ## Protocol References
 - Art-Net 4: https://art-net.org.uk/downloads/art-net.pdf

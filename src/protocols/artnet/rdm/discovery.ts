@@ -43,6 +43,7 @@ function decodeDiscoveryResponse(buffer: Buffer): UID | null {
     return uidFromBuffer(uidBytes, 0);
 }
 
+/** Build DISC_UNIQUE_BRANCH request payload for a UID range. */
 function buildDiscoveryUniqueBranch(lower: UID, upper: UID, sourceUid: UID, transactionNumber: number): Buffer {
     const data = Buffer.concat([uidToBuffer(lower), uidToBuffer(upper)]);
     return encodeRdmRequest({
@@ -57,6 +58,7 @@ function buildDiscoveryUniqueBranch(lower: UID, upper: UID, sourceUid: UID, tran
     });
 }
 
+/** Build DISC_MUTE or DISC_UN_MUTE request. */
 function buildMute(uid: UID, sourceUid: UID, transactionNumber: number, unmute = false): Buffer {
     return encodeRdmRequest({
         destinationUid: uid,
@@ -70,12 +72,21 @@ function buildMute(uid: UID, sourceUid: UID, transactionNumber: number, unmute =
 }
 
 export type DiscoveryOptions = {
+    /** Timeout applied to each transport request. */
     timeoutMs?: number;
+    /** Controller/source UID used in generated requests. */
     sourceUid: UID;
+    /** Whether to mute each found device during discovery. */
     muteFound?: boolean;
+    /** Whether to unmute all muted devices before returning. */
     unmuteAtEnd?: boolean;
 };
 
+/**
+ * Run RDM binary-search discovery across full UID range.
+ * @param transport RDM transport implementation.
+ * @param options Discovery behavior flags and source UID.
+ */
 export async function discoverDevices(
     transport: RdmTransport,
     options: DiscoveryOptions,
@@ -150,6 +161,7 @@ export async function discoverDevices(
     return results;
 }
 
+/** Low-level request builders exposed for testing/integration use. */
 export const discoveryHelpers = {
     buildDiscoveryUniqueBranch,
     buildMute,

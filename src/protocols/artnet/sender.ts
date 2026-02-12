@@ -25,24 +25,37 @@ import {
 } from './packet';
 
 export type ArtNetSenderConfiguration = {
+    /** 1-based universe number sent in OpDmx packet Port-Address fields. */
     universe: number;
+    /** Destination node IP/hostname. Defaults to broadcast. */
     host?: string;
+    /** Destination UDP port. Defaults to 6454. */
     port?: number;
+    /** Local interface/bind address. */
     bindAddress?: string;
+    /** Enable socket broadcast mode. */
     broadcast?: boolean;
+    /** Physical output port metadata in OpDmx. */
     physical?: number;
+    /** Auto-increment Art-Net sequence byte when true. */
     sequence?: boolean;
 };
 
 export interface ArtNetSenderEvents {
+    /** Low-level socket send/bind errors. */
     error: [Error];
 }
 
+/** Sends Art-Net packets (OpDmx and optional auxiliary opcodes). */
 export class ArtNetSender extends EventEmitter<ArtNetSenderEvents> {
     private readonly socket: Socket;
     private readonly config: ArtNetSenderConfiguration;
     private sequence = 0;
 
+    /**
+     * Create an Art-Net sender.
+     * @param config Art-Net transport configuration.
+     */
     constructor(config: ArtNetSenderConfiguration) {
         super();
         this.config = config;

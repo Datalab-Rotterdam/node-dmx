@@ -11,7 +11,7 @@ export default defineConfig({
             fileName: (format) => `index.${format}.js`
         },
         rollupOptions: {
-            external: ["crypto"],
+            external: ["crypto", 'events', 'dgram','node:assert'],
         },
         sourcemap: true,
         target: 'node24'

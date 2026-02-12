@@ -10,13 +10,19 @@ import {ARTNET_ID, ARTNET_PROTOCOL_VERSION, DiagnosticsPriority, OpCode} from '.
 import {readNullTerminatedString, splitUniverseAddress} from './util';
 
 export type ArtDmxOptions = {
+    /** 1-based universe number to send to. */
     universe: number;
+    /** Art-Net sequence byte (0-255). */
     sequence: number;
+    /** Physical output port number on controller, if used. */
     physical?: number;
+    /** DMX frame bytes. */
     data: Uint8Array | Buffer;
+    /** Optional data length override (max 512). */
     length?: number;
 };
 
+/** Bitfield flags/options for an ArtPoll packet. */
 export type ArtPollOptions = {
     sendDiagnostics?: boolean;
     diagnosticsUnicast?: boolean;
@@ -27,11 +33,13 @@ export type ArtPollOptions = {
     priority?: DiagnosticsPriority;
 };
 
+/** Payload for OpDiagData packets. */
 export type ArtDiagDataOptions = {
     priority?: DiagnosticsPriority;
     message: string;
 };
 
+/** SMPTE-like timecode fields for ArtTimeCode. */
 export type ArtTimeCode = {
     frames: number;
     seconds: number;
@@ -40,12 +48,14 @@ export type ArtTimeCode = {
     type: number;
 };
 
+/** Trigger key/sub-key and optional payload for OpTrigger. */
 export type ArtTrigger = {
     key: number;
     subKey: number;
     payload?: Uint8Array | Buffer;
 };
 
+/** Parsed subset of fields from ArtPollReply. */
 export type ArtPollReply = {
     ip: string;
     port: number;
@@ -62,12 +72,17 @@ export type ArtPollReply = {
     status3?: number;
 };
 
+/** Write common Art-Net header fields into a packet buffer. */
 const writeHeader = (buffer: Buffer, opcode: OpCode): void => {
     buffer.write(ARTNET_ID, 0, 'ascii');
     buffer.writeUInt16LE(opcode, 8);
     buffer.writeUInt16BE(ARTNET_PROTOCOL_VERSION, 10);
 };
 
+/**
+ * Build an ArtPoll packet used for node discovery.
+ * @param options Poll flags and diagnostic priority.
+ */
 export const buildArtPoll = (options: ArtPollOptions = {}): Buffer => {
     const buffer = Buffer.alloc(14);
     writeHeader(buffer, OpCode.OpPoll);
@@ -83,6 +98,10 @@ export const buildArtPoll = (options: ArtPollOptions = {}): Buffer => {
     return buffer;
 };
 
+/**
+ * Build an ArtDMX packet carrying a DMX frame for one universe.
+ * @param options DMX payload and addressing fields.
+ */
 export const buildArtDmx = (options: ArtDmxOptions): Buffer => {
     const length = Math.min(options.length ?? options.data.length, 512);
     const buffer = Buffer.alloc(18 + length);
@@ -97,6 +116,7 @@ export const buildArtDmx = (options: ArtDmxOptions): Buffer => {
     return buffer;
 };
 
+/** Build an ArtSync packet for multi-universe synchronization. */
 export const buildArtSync = (): Buffer => {
     const buffer = Buffer.alloc(14);
     writeHeader(buffer, OpCode.OpSync);
@@ -105,6 +125,10 @@ export const buildArtSync = (): Buffer => {
     return buffer;
 };
 
+/**
+ * Build an ArtDiagData packet with an ASCII diagnostics message.
+ * @param options Diagnostics priority and message.
+ */
 export const buildArtDiagData = (options: ArtDiagDataOptions): Buffer => {
     const message = Buffer.from(options.message, 'ascii');
     const buffer = Buffer.alloc(16 + message.length + 1);
@@ -117,6 +141,10 @@ export const buildArtDiagData = (options: ArtDiagDataOptions): Buffer => {
     return buffer;
 };
 
+/**
+ * Build an ArtTimeCode packet.
+ * @param timeCode Timecode components.
+ */
 export const buildArtTimeCode = (timeCode: ArtTimeCode): Buffer => {
     const buffer = Buffer.alloc(19);
     writeHeader(buffer, OpCode.OpTimeCode);
@@ -130,6 +158,10 @@ export const buildArtTimeCode = (timeCode: ArtTimeCode): Buffer => {
     return buffer;
 };
 
+/**
+ * Build an ArtCommand packet.
+ * @param command ASCII command string sent to Art-Net nodes.
+ */
 export const buildArtCommand = (command: string): Buffer => {
     const commandBuffer = Buffer.from(command, 'ascii');
     const buffer = Buffer.alloc(14 + commandBuffer.length + 1);
@@ -141,6 +173,10 @@ export const buildArtCommand = (command: string): Buffer => {
     return buffer;
 };
 
+/**
+ * Build an ArtTrigger packet.
+ * @param trigger Trigger fields.
+ */
 export const buildArtTrigger = (trigger: ArtTrigger): Buffer => {
     const payload = trigger.payload ? Buffer.from(trigger.payload) : Buffer.alloc(0);
     const buffer = Buffer.alloc(18 + payload.length);
@@ -154,6 +190,11 @@ export const buildArtTrigger = (trigger: ArtTrigger): Buffer => {
     return buffer;
 };
 
+/**
+ * Parse an ArtPollReply buffer into a typed object.
+ * @param buffer Raw UDP payload.
+ * @returns Parsed reply or `null` when payload is not an ArtPollReply.
+ */
 export const parseArtPollReply = (buffer: Buffer): ArtPollReply | null => {
     if (buffer.length < 239) return null;
     const id = buffer.toString('ascii', 0, 8);

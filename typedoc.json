@@ -1,0 +1,11 @@
+{
+  "entryPoints": [
+    "src/index.ts"
+  ],
+  "out": "generated/docs",
+  "name": "node-dmx",
+  "readme": "README.md",
+  "theme": "default",
+  "excludePrivate": true,
+  "excludeProtected": true
+}

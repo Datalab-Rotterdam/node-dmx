@@ -17,15 +17,29 @@ import {
 } from './constants';
 
 export interface Options {
+    /** Universe number (1-63999). */
     universe: number;
+    /** Channel payload as sparse object or raw DMX bytes. */
     payload: Payload | Buffer | Uint8Array;
+    /** E1.31 sequence byte (0-255). */
     sequence: number;
+    /** Source name (max 64 ASCII chars in wire format). */
     sourceName?: string;
+    /** E1.31 priority value (0-200, typical default 100). */
     priority?: number;
+    /** 16-byte CID UUID-like identifier. */
     cid?: Buffer;
+    /** If true, treat payload values as 0-255 raw DMX instead of 0-100%. */
     useRawDmxValues?: boolean;
 }
 
+/**
+ * Parsed or encoded sACN packet model.
+ *
+ * Construct with:
+ * - `Buffer` to parse a received packet
+ * - `Options` to build a sendable packet
+ */
 export class Packet {
     // Root Layer
     private readonly rootVector = RootVector.DATA;
@@ -33,16 +47,23 @@ export class Packet {
     private readonly preambleSize = 0x0010;
     private readonly postambleSize = 0;
     private readonly acnPid = ACN_PID;
+    /** Component Identifier (CID) from root layer. */
     public cid: Buffer = Buffer.alloc(16);
 
     // Framing Layer
     private readonly frameVector = FrameVector.DATA;
     private frameFl: number = 0;
+    /** Framing options byte. */
     public options = 0;
+    /** Packet sequence number (0-255). */
     public sequence: number = 0;
+    /** Source name from framing layer. */
     public sourceName: string = '';
+    /** Packet priority (default 100). */
     public priority: number = 100;
+    /** Synchronization universe (usually 0). */
     public syncUniverse = 0;
+    /** Universe number for payload. */
     public universe: number = 1;
 
     // DMP Layer
@@ -57,6 +78,11 @@ export class Packet {
 
     private useRawDmxValues: boolean = false;
 
+    /**
+     * Parse or build an sACN packet.
+     * @param input Raw buffer to parse, or packet options to encode.
+     * @param sourceAddress Optional sender address when parsing.
+     */
     constructor(
         input: Buffer | Options,
         public readonly sourceAddress?: string,
@@ -65,7 +91,7 @@ export class Packet {
             throw new Error('Packet instantiated with no input');
         }
 
-        if (input instanceof Buffer) {
+        if (Buffer.isBuffer(input)) {
             this.parseFromBuffer(input);
         } else {
             this.createFromOptions(input as Options);
@@ -130,16 +156,22 @@ export class Packet {
         this.cid = options.cid ? Buffer.from(options.cid) : DEFAULT_CID; // ensure copy
     }
 
+    /**
+     * Payload in sparse object form (channel => percentage value).
+     * If the source was raw bytes, values are converted from 0-255 to 0-100%.
+     */
     public get payload(): Payload {
-        return this.payloadInput instanceof Buffer
+        return Buffer.isBuffer(this.payloadInput)
             ? objectify(this.payloadInput)
             : {...this.payloadInput}; // defensive copy
     }
 
+    /** Raw payload buffer when packet originated from raw bytes, else `null`. */
     public get payloadAsBuffer(): Buffer | null {
-        return this.payloadInput instanceof Buffer ? this.payloadInput : null;
+        return Buffer.isBuffer(this.payloadInput) ? this.payloadInput : null;
     }
 
+    /** Fully encoded E1.31 packet bytes ready to send over UDP. */
     public get buffer(): Buffer {
         const sourceNameBuf = Buffer.alloc(64, 0);
         if (this.sourceName) {
@@ -150,7 +182,7 @@ export class Packet {
 
         const dmxData = Buffer.alloc(512, 0);
 
-        if (this.payloadInput instanceof Buffer) {
+        if (Buffer.isBuffer(this.payloadInput)) {
             const length = Math.min(this.payloadInput.length, 512);
             for (let i = 0; i < length; i++) {
                 dmxData[i] = inRange(this.payloadInput[i]);

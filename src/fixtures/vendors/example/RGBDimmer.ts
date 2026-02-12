@@ -1,11 +1,21 @@
 import {FixtureModelPlugin} from '../../types';
 
+/** Convert normalized value in the range 0-1 to DMX 0-255. */
 function clamp8(value: number): number {
     if (value <= 0) return 0;
     if (value >= 1) return 255;
     return (value * 255) & 0xff;
 }
 
+/**
+ * Example 4-channel RGB dimmer fixture plugin.
+ *
+ * Channels in the `4ch` personality:
+ * 1. Dimmer
+ * 2. Red
+ * 3. Green
+ * 4. Blue
+ */
 export const RGBDimmerFixture: FixtureModelPlugin = {
     manufacturerId: 0x1234,
     vendor: 'ExampleCo',

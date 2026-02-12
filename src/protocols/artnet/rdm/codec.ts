@@ -26,6 +26,10 @@ function checksum16(buf: Buffer, length: number): number {
     return sum & 0xffff;
 }
 
+/**
+ * Encode an RDM request into raw wire bytes including checksum.
+ * @param request Request fields.
+ */
 export function encodeRdmRequest(request: RdmRequest): Buffer {
     const parameterData = request.parameterData ?? Buffer.alloc(0);
     if (parameterData.length > RDM_MAX_PDL) {
@@ -54,6 +58,11 @@ export function encodeRdmRequest(request: RdmRequest): Buffer {
     return buf;
 }
 
+/**
+ * Decode and validate an RDM response frame.
+ * @param buf Raw RDM bytes including checksum.
+ * @throws Error when start code, length, or checksum is invalid.
+ */
 export function decodeRdmResponse(buf: Buffer): RdmResponse {
     if (buf.length < RDM_MIN_BYTES) {
         throw new RangeError('RDM buffer too short');

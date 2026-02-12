@@ -12,19 +12,29 @@ import {ARTNET_PORT} from './constants';
 import {buildArtPoll, type ArtPollOptions, parseArtPollReply, type ArtPollReply} from './packet';
 
 export type ArtNetDiscoveryOptions = {
+    /** Time window for collecting replies in `pollOnce`. */
     timeoutMs?: number;
+    /** Optional local bind address for receiving replies. */
     bindAddress?: string;
+    /** UDP port override (default Art-Net port 6454). */
     port?: number;
 };
 
 export interface ArtNetDiscoveryEvents {
+    /** Emitted for each valid ArtPollReply packet. */
     reply: [ArtPollReply];
+    /** Socket-level errors. */
     error: [Error];
 }
 
+/** Utility class for discovering Art-Net nodes via ArtPoll. */
 export class ArtNetDiscovery extends EventEmitter<ArtNetDiscoveryEvents> {
     private readonly socket: Socket;
 
+    /**
+     * Create a discovery helper that can send ArtPoll and receive replies.
+     * @param options Socket bind and timeout options.
+     */
     constructor(options: ArtNetDiscoveryOptions = {}) {
         super();
         this.socket = createSocket('udp4');

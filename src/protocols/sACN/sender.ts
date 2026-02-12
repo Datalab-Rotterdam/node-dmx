@@ -8,22 +8,32 @@ import {multicastGroup} from './util';
 import {type Options, Packet} from './packet';
 
 export type SenderConfiguration = {
+    /** Universe id (1-63999). */
     universe: number;
+    /** UDP port (default 5568). */
     port?: number;
+    /** Enable socket address reuse. */
     reuseAddr?: boolean;
+    /** Optional periodic resend rate (packets/sec). */
     refreshRate?: number;
+    /** Default packet metadata merged into every send. */
     defaultPacketOptions?: Partial<
         Pick<Options, 'cid' | 'sourceName' | 'priority' | 'useRawDmxValues'>
     >;
+    /** Local multicast interface address. */
     iface?: string;
+    /** Send unicast to this host instead of multicast group. */
     useUnicastDestination?: string;
 };
 
 export interface SenderEvents {
+    /** Emitted when periodic resend health toggles between success/failure. */
     changedResendStatus: [success: boolean];
+    /** Emitted when resend loop encounters an error. */
     error: [error: Error];
 }
 
+/** Sends E1.31 (sACN) packets for one universe over UDP. */
 export class Sender extends EventEmitter<SenderEvents> {
     private readonly socket: Socket;
     private readonly port: number;
@@ -38,6 +48,10 @@ export class Sender extends EventEmitter<SenderEvents> {
 
     private latestPacketOptions: Omit<Options, 'sequence' | 'universe'> | undefined;
 
+    /**
+     * Create an sACN sender for one universe.
+     * @param config Network and packet defaults.
+     */
     constructor(config: SenderConfiguration) {
         super();
 
@@ -80,6 +94,10 @@ export class Sender extends EventEmitter<SenderEvents> {
         }
     }
 
+    /**
+     * Send a high-level payload/options object.
+     * @param packet Packet fields except sequence/universe (filled automatically).
+     */
     public async send(packet: Omit<Options, 'sequence' | 'universe'>): Promise<void> {
         const finalPacket: Options = {
             ...this.defaultPacketOptions,
@@ -95,6 +113,11 @@ export class Sender extends EventEmitter<SenderEvents> {
         await this.sendBuffer(buffer);
     }
 
+    /**
+     * Send raw DMX bytes as E1.31 payload.
+     * @param payload Raw DMX bytes (up to 512 used).
+     * @param overrides Optional metadata overrides for this send.
+     */
     public async sendRaw(
         payload: Buffer | Uint8Array,
         overrides: Omit<Options, 'sequence' | 'universe' | 'payload'> = {},

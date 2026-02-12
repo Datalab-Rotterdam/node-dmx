@@ -2,7 +2,7 @@
  * Core DMX controller that manages universes and sends them over a protocol.
  * @module core/DMXController
  */
-import {Sender as SacnSender, type SenderConfiguration, type Options} from '../protocols/sacn';
+import {Sender as SacnSender, type SenderConfiguration, type Options} from '../protocols/sACN';
 import {ArtNetSender, type ArtNetSenderConfiguration} from '../protocols';
 import {Universe} from './Universe';
 
@@ -29,11 +29,17 @@ export type ControllerOptions = {
     artSync?: boolean;
     /** Provide a custom sender factory if you want full control. */
     senderFactory?: (universeId: number) => DmxSender;
+    /** UDP port used by protocol sender. */
     port?: number;
+    /** Allow multiple listeners/senders on same UDP port. */
     reuseAddr?: boolean;
+    /** Keep-alive resend rate in packets/second (sACN sender option). */
     refreshRate?: number;
+    /** Local network interface IPv4 address. */
     iface?: string;
+    /** Optional unicast destination instead of multicast/broadcast. */
     unicastDestination?: string;
+    /** Default E1.31 packet metadata applied to every send. */
     defaultPacketOptions?: Partial<
         Pick<Options, 'cid' | 'sourceName' | 'priority' | 'useRawDmxValues'>
     >;
@@ -48,10 +54,15 @@ type UniverseEntry = {
     sender: DmxSender;
 };
 
+/** High-level API for managing universes and sending protocol frames. */
 export class DMXController {
     private readonly options: ControllerOptions;
     private readonly universes = new Map<number, UniverseEntry>();
 
+    /**
+     * Create a controller that owns universes and network senders.
+     * @param options Protocol and network settings.
+     */
     constructor(options: ControllerOptions = {}) {
         this.options = options;
     }
@@ -76,6 +87,13 @@ export class DMXController {
         return entry.universe;
     }
 
+    /**
+     * Convenience method to set one channel in a specific universe.
+     * @param universeId Universe id.
+     * @param address Channel address (1-512).
+     * @param value Channel value (0-255).
+     * @returns The target universe instance.
+     */
     public setChannel(universeId: number, address: number, value: number): Universe {
         const universe = this.addUniverse(universeId);
         universe.setChannel(address, value);

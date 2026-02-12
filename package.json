@@ -21,8 +21,25 @@
     "test": "vitest",
     "test:ui": "vitest --ui",
     "test:coverage": "vitest run --coverage",
-    "example/auth": "tsx examples/auth.ts",
-    "docs:build": "typedoc src/index.ts --out generated/docs --name \"node-dmx\" --readme README.md --theme default --excludePrivate --excludeProtected"
+    "example/sacn-animate": "tsx examples/sacn-animate.ts",
+    "example/sacn-comet-chase": "tsx examples/sacn-comet-chase.ts",
+    "example/sacn-fire-flicker": "tsx examples/sacn-fire-flicker.ts",
+    "example/sacn-police-strobe": "tsx examples/sacn-police-strobe.ts",
+    "example/sacn-breathing-pastels": "tsx examples/sacn-breathing-pastels.ts",
+    "example/sacn-color-wipe": "tsx examples/sacn-color-wipe.ts",
+    "example/sacn-sparkle": "tsx examples/sacn-sparkle.ts",
+    "example/sacn-theater-chase": "tsx examples/sacn-theater-chase.ts",
+    "example/sacn-aurora": "tsx examples/sacn-aurora.ts",
+    "example/sacn-pulse-stack": "tsx examples/sacn-pulse-stack.ts",
+    "example/sacn-storm": "tsx examples/sacn-storm.ts",
+    "example/sacn-halloween": "tsx examples/sacn-halloween.ts",
+    "example/sacn-christmas": "tsx examples/sacn-christmas.ts",
+    "example/sacn-rainbow": "tsx examples/sacn-rainbow.ts",
+    "example/sacn-listen-matrix": "tsx examples/sacn-listen-matrix.ts",
+    "example/network-debugger": "tsx examples/network-debugger/app.ts",
+    "example/sacn-basic": "tsx examples/sacn-basic.ts",
+    "example/list-network-interfaces": "tsx examples/list-network-interfaces.ts",
+    "docs:build": "typedoc --options typedoc.json"
   },
   "repository": {
     "type": "git",
@@ -38,7 +55,7 @@
     "dmx512",
     "512"
   ],
-  "author": "Alexander Slaa",
+  "author": "A.P.A. Slaa",
   "license": "Apache-2.0",
   "type": "module",
   "bugs": {
@@ -86,5 +103,3 @@
     ]
   }
 }
-
-

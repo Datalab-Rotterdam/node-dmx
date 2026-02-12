@@ -5,9 +5,18 @@ import {DMXController} from '../core';
  */
 import {FixtureModelPlugin, FixtureState} from './types';
 
+/** Fixture instance bound to one universe/address/personality. */
 export class Fixture {
     private state: FixtureState = {};
 
+    /**
+     * Create a fixture binding.
+     * @param dmx Shared DMX controller.
+     * @param plugin Fixture model plugin.
+     * @param universe Target universe id.
+     * @param address DMX start address (1-512).
+     * @param personalityId Selected personality id from plugin.
+     */
     constructor(
         private readonly dmx: DMXController,
         private readonly plugin: FixtureModelPlugin,

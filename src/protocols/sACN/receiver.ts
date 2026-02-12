@@ -65,6 +65,10 @@ export class Receiver extends EventEmitter<ReceiverEvents> {
     private universes: number[];
     private readonly iface?: string;
 
+    /**
+     * Create an sACN receiver and subscribe to initial universes.
+     * @param props Receiver socket/universe options.
+     */
     constructor({
                     universes = [1],
                     port = 5568,

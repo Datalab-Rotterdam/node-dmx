@@ -1,7 +1,7 @@
 {
   "name": "node-dmx",
   "version": "0.0.1",
-  "description": "node-dmx is a TypeScript library for controlling DMX over IP from Node.js.\n\n",
+  "description": "node-dmx is a TypeScript library for controlling DMX over IP from Node.js.",
   "main": "./dist/index.es.js",
   "module": "./dist/index.es.js",
   "types": "./dist/index.d.ts",

@@ -1,3 +1,10 @@
+# [1.1.0](https://github.com/DataLab-Rotterdam/node-dmx/compare/v1.0.1...v1.1.0) (2026-02-12)
+
+
+### Features
+
+* added rdmnet ([b07eb6a](https://github.com/DataLab-Rotterdam/node-dmx/commit/b07eb6a15cd5974549b6e45abf28d8cba725cfc0))
+
 ## [1.0.1](https://github.com/DataLab-Rotterdam/node-dmx/compare/v1.0.0...v1.0.1) (2026-02-12)
 
 

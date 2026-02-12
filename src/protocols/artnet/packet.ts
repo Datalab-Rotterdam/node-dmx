@@ -22,6 +22,18 @@ export type ArtDmxOptions = {
     length?: number;
 };
 
+/** Parsed subset of fields from an incoming OpDmx packet. */
+export type ArtDmxPacket = {
+    protocolVersion: number;
+    sequence: number;
+    physical: number;
+    net: number;
+    subNet: number;
+    universe: number;
+    length: number;
+    data: Buffer;
+};
+
 /** Bitfield flags/options for an ArtPoll packet. */
 export type ArtPollOptions = {
     sendDiagnostics?: boolean;
@@ -114,6 +126,47 @@ export const buildArtDmx = (options: ArtDmxOptions): Buffer => {
     buffer.writeUInt16BE(length, 16);
     Buffer.from(options.data).copy(buffer, 18, 0, length);
     return buffer;
+};
+
+/**
+ * Parse an OpDmx payload into typed fields.
+ * @param buffer Raw UDP payload.
+ * @returns Parsed OpDmx data or `null` when payload is not OpDmx.
+ */
+export const parseArtDmx = (buffer: Buffer): ArtDmxPacket | null => {
+    if (buffer.length < 18) return null;
+    const id = buffer.toString('ascii', 0, 8);
+    if (id !== ARTNET_ID) return null;
+    const opcode = buffer.readUInt16LE(8);
+    if (opcode !== OpCode.OpDmx) return null;
+
+    const protocolVersion = buffer.readUInt16BE(10);
+    const sequence = buffer.readUInt8(12);
+    const physical = buffer.readUInt8(13);
+    const subUni = buffer.readUInt8(14);
+    const net = buffer.readUInt8(15);
+    const length = buffer.readUInt16BE(16);
+    if (length < 2 || length > 512) {
+        throw new RangeError(`Invalid ArtDMX length ${length}: must be 2-512.`);
+    }
+    if (buffer.length < 18 + length) {
+        throw new RangeError(`ArtDMX packet truncated: expected ${18 + length} bytes, got ${buffer.length}.`);
+    }
+
+    const subNet = (subUni >> 4) & 0x0f;
+    const uni = subUni & 0x0f;
+    const universe = ((net & 0x7f) << 8) | (subNet << 4) | uni;
+
+    return {
+        protocolVersion,
+        sequence,
+        physical,
+        net,
+        subNet,
+        universe: universe + 1,
+        length,
+        data: Buffer.from(buffer.subarray(18, 18 + length)),
+    };
 };
 
 /** Build an ArtSync packet for multi-universe synchronization. */

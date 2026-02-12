@@ -9,6 +9,7 @@ import {
     buildArtSync,
     buildArtTimeCode,
     buildArtTrigger,
+    parseArtDmx,
     parseArtPollReply,
 } from '../src';
 import {readNullTerminatedString, splitUniverseAddress} from '../src';
@@ -151,5 +152,43 @@ describe('parseArtPollReply', () => {
             status2: 6,
             status3: 7,
         });
+    });
+});
+
+describe('parseArtDmx', () => {
+    it('returns null for non-OpDmx payloads', () => {
+        expect(parseArtDmx(Buffer.alloc(10))).toBeNull();
+        expect(parseArtDmx(buildArtPoll())).toBeNull();
+    });
+
+    it('parses a valid OpDmx payload', () => {
+        const packet = buildArtDmx({
+            universe: 257,
+            sequence: 11,
+            physical: 2,
+            data: Uint8Array.from([1, 2, 3, 4]),
+        });
+        const parsed = parseArtDmx(packet);
+
+        expect(parsed).toEqual({
+            protocolVersion: ARTNET_PROTOCOL_VERSION,
+            sequence: 11,
+            physical: 2,
+            net: 1,
+            subNet: 0,
+            universe: 257,
+            length: 4,
+            data: Buffer.from([1, 2, 3, 4]),
+        });
+    });
+
+    it('throws on malformed OpDmx payload length', () => {
+        const packet = buildArtDmx({
+            universe: 1,
+            sequence: 1,
+            data: Uint8Array.from([1, 2, 3, 4]),
+        });
+        packet.writeUInt16BE(600, 16);
+        expect(() => parseArtDmx(packet)).toThrow(RangeError);
     });
 });

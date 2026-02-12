@@ -5,6 +5,7 @@ import {Fixture} from '../src';
 import {InMemoryFixtureRegistry} from '../src';
 import type {FixtureModelPlugin} from '../src';
 import {RGBDimmerFixture} from '../src';
+import {RGBWW5Fixture} from '../src';
 
 const stubSender = {
     sendRaw: vi.fn().mockResolvedValue(undefined),
@@ -124,5 +125,56 @@ describe('RGBDimmerFixture', () => {
         });
 
         expect(Array.from(frame)).toEqual([1, 2, 3, 4]);
+    });
+});
+
+describe('RGBWW5Fixture', () => {
+    it('matches expected fixture identity', () => {
+        expect(RGBWW5Fixture.match({manufacturerId: 0x1234, modelId: 0x0002})).toBe(true);
+        expect(RGBWW5Fixture.match({manufacturerId: 0x9999, modelId: 0x0002})).toBe(false);
+    });
+
+    it('encodes rgbww channels into frame', () => {
+        const frame = new Uint8Array(20);
+
+        RGBWW5Fixture.encode({
+            personalityId: '5ch',
+            state: {rgbww: [1, 0.5, 0.25, 0.75, 0], dimmer: 1},
+            ctx: {base: 3, frame},
+        });
+
+        expect(frame[3]).toBe(255);
+        expect(frame[4]).toBe(127);
+        expect(frame[5]).toBe(63);
+        expect(frame[6]).toBe(191);
+        expect(frame[7]).toBe(0);
+    });
+
+    it('supports rgb + warm/cool white fallback state fields', () => {
+        const frame = new Uint8Array(10);
+
+        RGBWW5Fixture.encode({
+            personalityId: '5ch',
+            state: {rgb: [0.2, 0.4, 0.6], warmWhite: 1, coolWhite: 0.5, dimmer: 0.5},
+            ctx: {base: 0, frame},
+        });
+
+        expect(frame[0]).toBe(25);
+        expect(frame[1]).toBe(51);
+        expect(frame[2]).toBe(76);
+        expect(frame[3]).toBe(127);
+        expect(frame[4]).toBe(63);
+    });
+
+    it('ignores unknown personality id', () => {
+        const frame = new Uint8Array([9, 8, 7, 6, 5]);
+
+        RGBWW5Fixture.encode({
+            personalityId: 'unknown',
+            state: {rgbww: [1, 1, 1, 1, 1]},
+            ctx: {base: 0, frame},
+        });
+
+        expect(Array.from(frame)).toEqual([9, 8, 7, 6, 5]);
     });
 });

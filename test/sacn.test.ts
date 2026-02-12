@@ -1,7 +1,7 @@
 import {describe, expect, it} from 'vitest';
 
 import {Packet} from '../src';
-import {bit, dp, empty, inRange, multicastGroup, objectify} from '../src/protocols/sACN/util';
+import {bit, dp, empty, inRange, multicastGroup, objectify} from '../src/protocols/sacn/util';
 
 describe('sACN util', () => {
     it('builds multicast groups for valid universes', () => {

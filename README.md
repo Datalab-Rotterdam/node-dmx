@@ -6,7 +6,25 @@ It supports:
 - sACN (E1.31)
 - Art-Net 4
 - RDM over Art-Net
+- RDMnet (ANSI E1.33 transport + broker/session + RPT/EPT/LLRP + endpoint capability registry)
 - A fixture plugin system
+
+## RDMnet Compliance Status
+- Current state: production-grade implementation in progress toward full E1.33 interoperability.
+- Implemented: strict packet/message decoding, broker/session flows, RPT/EPT/LLRP helpers, TLS transport options, and interop test harnesses.
+- Not yet claimed: formal/full E1.33 compliance certification.
+- Required for a full compliance claim: successful third-party broker/device conformance runs in your target environment.
+
+## Feature Support Matrix
+| Area | Feature | sACN (E1.31) | Art-Net 4 | RDMnet (E1.33) | Notes |
+|---|---|---|---|---|---|
+| Core I/O | DMX Send | ✅ | ✅ | ❌ | `DMXController` sends DMX via sACN/Art-Net |
+| Core I/O | DMX Receive / Listen | ✅ | ✅ | ✅ | `Receiver`, `ArtNetReceiver`, `RdmnetClient` |
+| Device Discovery | Controller/Node Discovery | ❌ | ✅ | ⚠️ Partial | `ArtNetDiscovery`, `RdmnetDiscovery` (DNS-SD + mDNS) |
+| Device Management | RDM Messaging | ❌ | ✅ | ⚠️ Partial | `ArtNetRdmClient` full flow, `RdmnetClient` supports broker session + RPT `rdmTransaction` |
+| Security | Secure Transport | ❌ | ❌ | ✅ | `RdmnetClient` supports `transport: 'tls'`, peer auth policy, post-connect auth hook |
+| Ecosystem | Fixture Plugin System | ✅ | ✅ | ❌ | Fixture API currently targets DMX output protocols |
+| Compliance | Formal Protocol Compliance Claim | ✅ E1.31 implementation | ✅ Art-Net implementation | ⚠️ In progress | RDMnet full claim depends on third-party interop/conformance runs |
 
 This guide is written for students and first-time users: start simple, then move to advanced features.
 
@@ -126,6 +144,10 @@ fixture.render();
 await controller.flush();
 ```
 
+Available built-in example fixture plugins:
+- `RGBDimmerFixture` (`4ch`: dimmer + RGB)
+- `RGBWW5Fixture` (`5ch`: R + G + B + warm white + cool white)
+
 ## 7. Runnable Examples
 All examples live in `examples/`.
 
@@ -134,8 +156,13 @@ Core examples:
 - `examples/sacn-animate.ts`
 - `examples/sacn-rainbow.ts`
 - `examples/artnet-animate.ts`
+- `examples/artnet-listen-matrix.ts`
 - `examples/artnet-discover.ts`
 - `examples/rdm-tod.ts`
+- `examples/rdmnet-listen.ts`
+- `examples/rdmnet-discover.ts`
+- `examples/rdmnet-interop-smoke.ts`
+- `examples/fixture-rgbww5.ts`
 
 Additional animation examples:
 - `examples/sacn-comet-chase.ts`
@@ -164,7 +191,37 @@ Useful options for `DMXController`:
 - `unicastDestination`: send unicast instead of multicast/broadcast
 - `artSync`: send ArtSync after flush (Art-Net)
 
-## 9. TypeDoc
+RDMnet client options:
+- `transport`: `'tcp' | 'tls'` (default `tcp`)
+- `tls`: Node TLS options (CA, client cert/key, ciphers, min/max version, etc.)
+- `requireTlsAuthorization`: reject unauthorized TLS peers (default `true` when `transport: 'tls'`)
+- `postConnectAuth`: async hook for environment-specific auth/profile checks
+
+## 9. RDMnet Interoperability/Conformance
+Use real brokers/devices for compliance verification (not mocks only).
+
+Smoke-runner against a real broker:
+```bash
+RDMNET_INTEROP_HOST=192.168.1.50 \
+RDMNET_INTEROP_PORT=5568 \
+npm run example/rdmnet-interop-smoke
+```
+
+Environment-gated integration test:
+```bash
+RDMNET_INTEROP_HOST=192.168.1.50 \
+RDMNET_INTEROP_PORT=5568 \
+RDMNET_INTEROP_SCOPE=default \
+npm run test:interop:rdmnet
+```
+
+Useful flags:
+- `RDMNET_INTEROP_TLS=1`: use TLS transport
+- `RDMNET_INTEROP_TLS_STRICT=0`: allow non-authorized TLS peer for lab setups
+- `RDMNET_INTEROP_CHECK_LISTS=1`: also validate client/endpoint list requests
+- `RDMNET_INTEROP_TIMEOUT_MS=5000`: per-request timeout override
+
+## 10. TypeDoc
 TypeDoc output uses `README.md` as the landing page.
 
 Build docs:
@@ -185,3 +242,4 @@ Output:
 - Art-Net 4: https://art-net.org.uk/downloads/art-net.pdf
 - ANSI E1.31 (sACN): https://tsp.esta.org/tsp/documents/published_docs.php
 - ANSI E1.20 (RDM): https://getdlight.com/media/kunena/attachments/42/ANSI_E1-20_2010.pdf
+- ANSI E1.33 (RDMnet): https://tsp.esta.org/tsp/documents/published_docs.php

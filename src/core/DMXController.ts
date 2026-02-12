@@ -2,7 +2,7 @@
  * Core DMX controller that manages universes and sends them over a protocol.
  * @module core/DMXController
  */
-import {Sender as SacnSender, type SenderConfiguration, type Options} from '../protocols/sACN';
+import {Sender as SacnSender, type SenderConfiguration, type Options} from '../protocols/sacn';
 import {ArtNetSender, type ArtNetSenderConfiguration} from '../protocols';
 import {Universe} from './Universe';
 

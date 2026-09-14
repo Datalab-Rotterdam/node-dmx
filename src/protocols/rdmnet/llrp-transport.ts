@@ -195,6 +195,7 @@ export class LlrpManager extends LlrpEndpoint {
             try {
                 const packet = parseRdmnetPacket(msg);
                 if (packet.vector !== RdmnetRootVector.Llrp) return;
+                if (packet.cid.equals(this.cid)) return; // ignore multicast loopback of our own send
                 const llrp = decodeLlrpMessage(packet.data);
                 if (llrp.vector !== LlrpVector.ProbeReply) return;
                 if (llrp.transactionNumber !== transactionNumber) return;
@@ -245,6 +246,7 @@ export class LlrpManager extends LlrpEndpoint {
                 try {
                     const packet = parseRdmnetPacket(msg);
                     if (packet.vector !== RdmnetRootVector.Llrp) return;
+                    if (packet.cid.equals(this.cid)) return; // ignore multicast loopback of our own send
                     const llrp = decodeLlrpMessage(packet.data);
                     if (llrp.vector !== LlrpVector.RdmCommand) return;
                     if (llrp.transactionNumber !== transactionNumber) return;
@@ -315,6 +317,7 @@ export class LlrpTarget extends LlrpEndpoint {
             return;
         }
         if (packet.vector !== RdmnetRootVector.Llrp) return;
+        if (packet.cid.equals(this.cid)) return; // ignore multicast loopback of our own send
         let llrp: LlrpMessage;
         try {
             llrp = decodeLlrpMessage(packet.data);

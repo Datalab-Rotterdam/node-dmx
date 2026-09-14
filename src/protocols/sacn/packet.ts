@@ -33,6 +33,12 @@ export interface Options {
     useRawDmxValues?: boolean;
     /** Framing layer Options bitfield (see {@link FrameOptions}). */
     options?: number;
+    /**
+     * Synchronization Address (E1.31 §6): the universe number of a
+     * Synchronization Packet receivers should wait for before applying this
+     * frame. `0` (default) means "no synchronization requested".
+     */
+    syncUniverse?: number;
 }
 
 /**
@@ -164,6 +170,7 @@ export class Packet {
         this.sequence = options.sequence;
         this.universe = options.universe;
         this.options = options.options ?? 0;
+        this.syncUniverse = options.syncUniverse ?? 0;
         this.cid = options.cid ? Buffer.from(options.cid) : DEFAULT_CID; // ensure copy
     }
 

@@ -155,7 +155,11 @@ All examples live in `examples/`.
 Core examples:
 - `examples/sacn-basic.ts`
 - `examples/sacn-animate.ts`
+- `examples/sacn-animate-orignal.ts` (older single-universe variant)
 - `examples/sacn-rainbow.ts`
+- `examples/sacn-sync.ts` — Synchronization Packets (E1.31 §6)
+- `examples/sacn-universe-discovery.ts` — Universe Discovery (E1.31 §8)
+- `examples/sacn-listen-matrix.ts`
 - `examples/artnet-animate.ts`
 - `examples/artnet-listen-matrix.ts`
 - `examples/artnet-discover.ts`
@@ -163,7 +167,10 @@ Core examples:
 - `examples/rdmnet-listen.ts`
 - `examples/rdmnet-discover.ts`
 - `examples/rdmnet-interop-smoke.ts`
+- `examples/rdmnet-rdm-transaction.ts` — RDM GET over RPT
+- `examples/rdmnet-llrp-discover.ts` — real LLRP UDP device discovery
 - `examples/fixture-rgbww5.ts`
+- `examples/list-network-interfaces.ts`
 
 Additional animation examples:
 - `examples/sacn-comet-chase.ts`

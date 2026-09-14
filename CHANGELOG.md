@@ -1,3 +1,16 @@
+# [1.2.0](https://github.com/DataLab-Rotterdam/node-dmx/compare/v1.1.1...v1.2.0) (2026-09-14)
+
+
+### Bug Fixes
+
+* correctness/spec-compliance audit across sACN, Art-Net, and RDMnet ([65cb134](https://github.com/DataLab-Rotterdam/node-dmx/commit/65cb134de0677703600f4b254849297f393a35f8))
+* ignore self-originated LLRP packets from multicast loopback ([9975088](https://github.com/DataLab-Rotterdam/node-dmx/commit/9975088ee3fd694cf2e5efb79e1f7c541447bf45))
+
+
+### Features
+
+* add RdmResponder to simulate RDM fixtures/devices over Art-Net, RDMnet, LLRP ([4bf608a](https://github.com/DataLab-Rotterdam/node-dmx/commit/4bf608abd63c5b5911076f253de932fa1c234750))
+
 ## [1.1.1](https://github.com/DataLab-Rotterdam/node-dmx/compare/v1.1.0...v1.1.1) (2026-02-12)
 
 

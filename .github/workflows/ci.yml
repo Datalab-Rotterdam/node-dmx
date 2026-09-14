@@ -99,6 +99,9 @@ jobs:
           node-version: 22
           registry-url: "https://registry.npmjs.org/"
 
+      - name: Strip stale npm auth line (avoids breaking OIDC, see actions/setup-node#1551)
+        run: sed -i '/_authToken/d' "${NPM_CONFIG_USERCONFIG:-$HOME/.npmrc}"
+
       - name: Install dependencies
         run: npm ci
 
@@ -108,7 +111,22 @@ jobs:
       - name: Build the package
         run: npm run build
 
-      - name: Semantic Release
+      - name: Semantic Release (npm trusted publishing via OIDC)
+        id: release
+        continue-on-error: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: npx semantic-release
+
+      - name: Fall back to NPM_TOKEN if OIDC publish failed
+        id: fallback
+        if: steps.release.outcome == 'failure'
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          if [ -z "$NPM_TOKEN" ]; then
+            echo "::error::OIDC trusted publishing failed and no NPM_TOKEN secret is set to fall back to."
+            exit 1
+          fi
+          npm config set //registry.npmjs.org/:_authToken "$NPM_TOKEN"
+          npm publish --provenance

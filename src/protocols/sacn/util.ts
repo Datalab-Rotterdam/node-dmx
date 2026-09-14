@@ -2,6 +2,15 @@
  * Utility functions for the sACN (E1.31) DMX512 implementation.
  * @module sACN/util
  */
+import {randomUUID} from 'crypto';
+
+/**
+ * Generates a random 16-byte CID (E1.31 §6.2.2 requires a per-component
+ * unique identifier, stable for the component's lifetime).
+ */
+export function randomCid(): Buffer {
+    return Buffer.from(randomUUID().replace(/-/g, ''), 'hex');
+}
 
 /**
  * Represents DMX channel data.

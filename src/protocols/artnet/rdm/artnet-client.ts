@@ -9,7 +9,7 @@
  *   https://getdlight.com/media/kunena/attachments/42/ANSI_E1-20_2010.pdf
  */
 import {createSocket, type Socket} from 'dgram';
-import {ARTNET_PORT} from '../constants';
+import {ARTNET_ID, ARTNET_PORT, OpCode} from '../constants';
 import {buildArtRdm, buildArtTodRequest, parseArtTodData} from './artnet-packets';
 import {encodeRdmRequest, decodeRdmResponse} from './codec';
 import type {RdmRequest, RdmResponse} from './types';
@@ -89,7 +89,13 @@ export class ArtNetRdmClient {
 
     private async collectResponses(packet: Buffer, timeoutMs?: number): Promise<Buffer[]> {
         const replies: Buffer[] = [];
-        const handler = (msg: Buffer) => replies.push(msg);
+        const handler = (msg: Buffer) => {
+            if (msg.length < 10) return;
+            if (msg.toString('ascii', 0, 8) !== ARTNET_ID) return;
+            const opcode = msg.readUInt16LE(8);
+            if (opcode !== OpCode.OpRdm && opcode !== OpCode.OpTodData) return;
+            replies.push(msg);
+        };
         this.socket.on('message', handler);
         await this.send(packet);
         const timeout = timeoutMs ?? this.options.timeoutMs ?? 1000;
@@ -109,8 +115,9 @@ export class ArtNetRdmClient {
     }
 
     private extractRdm(buffer: Buffer): RdmResponse | null {
-        if (buffer.length < 27) return null;
-        const rdmPacket = buffer.subarray(26);
+        // OpRdm payload: RdmPacket starts at offset 24 (see buildArtRdm).
+        if (buffer.length < 25) return null;
+        const rdmPacket = buffer.subarray(24);
         const withStartCode = Buffer.concat([Buffer.from([0xcc]), rdmPacket]);
         try {
             return decodeRdmResponse(withStartCode);

@@ -1,7 +1,7 @@
 import {DMXController} from "../src";
 
 const controller = new DMXController({
-    protocol:'sacn', iface: "10.0.0.102", reuseAddr: true
+    protocol:'sacn', iface: process.env.DMX_IFACE || "10.0.0.102", reuseAddr: true
 })
 
 const universe = controller.addUniverse(1);

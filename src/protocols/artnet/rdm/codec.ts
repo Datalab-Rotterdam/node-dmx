@@ -59,11 +59,91 @@ export function encodeRdmRequest(request: RdmRequest): Buffer {
 }
 
 /**
+ * Encode an RDM response into raw wire bytes including checksum.
+ * @param response Response fields.
+ */
+export function encodeRdmResponse(response: RdmResponse): Buffer {
+    const parameterData = response.parameterData ?? Buffer.alloc(0);
+    if (parameterData.length > RDM_MAX_PDL) {
+        throw new RangeError(`Parameter data too long (${parameterData.length})`);
+    }
+
+    const messageLength = RDM_MIN_MESSAGE_LENGTH + parameterData.length;
+    const buf = Buffer.alloc(messageLength + 2);
+    buf.writeUInt8(RDM_START_CODE, 0);
+    buf.writeUInt8(RDM_SUB_START_CODE, 1);
+    buf.writeUInt8(messageLength, 2);
+    uidToBuffer(response.destinationUid).copy(buf, 3);
+    uidToBuffer(response.sourceUid).copy(buf, 9);
+    buf.writeUInt8(response.transactionNumber & 0xff, 15);
+    buf.writeUInt8(response.responseType, 16);
+    buf.writeUInt8(response.messageCount ?? 0, 17);
+    buf.writeUInt16BE(response.subDevice ?? 0, 18);
+    buf.writeUInt8(response.commandClass, 20);
+    buf.writeUInt16BE(response.pid & 0xffff, 21);
+    buf.writeUInt8(parameterData.length & 0xff, 23);
+    if (parameterData.length > 0) {
+        parameterData.copy(buf, 24);
+    }
+    const checksum = checksum16(buf, messageLength);
+    buf.writeUInt16BE(checksum, messageLength);
+    return buf;
+}
+
+/**
  * Decode and validate an RDM response frame.
  * @param buf Raw RDM bytes including checksum.
  * @throws Error when start code, length, or checksum is invalid.
  */
 export function decodeRdmResponse(buf: Buffer): RdmResponse {
+    const frame = decodeRdmFrame(buf);
+    return {
+        destinationUid: frame.destinationUid,
+        sourceUid: frame.sourceUid,
+        transactionNumber: frame.transactionNumber,
+        responseType: frame.field2 as RdmResponseType,
+        messageCount: frame.messageCount,
+        subDevice: frame.subDevice,
+        commandClass: frame.commandClass,
+        pid: frame.pid,
+        parameterData: frame.parameterData,
+    };
+}
+
+/**
+ * Decode and validate an RDM request frame.
+ * @param buf Raw RDM bytes including checksum.
+ * @throws Error when start code, length, or checksum is invalid.
+ */
+export function decodeRdmRequest(buf: Buffer): RdmRequest {
+    const frame = decodeRdmFrame(buf);
+    return {
+        destinationUid: frame.destinationUid,
+        sourceUid: frame.sourceUid,
+        transactionNumber: frame.transactionNumber,
+        portId: frame.field2,
+        messageCount: frame.messageCount,
+        subDevice: frame.subDevice,
+        commandClass: frame.commandClass,
+        pid: frame.pid,
+        parameterData: frame.parameterData,
+    };
+}
+
+type DecodedRdmFrame = {
+    destinationUid: ReturnType<typeof uidFromBuffer>;
+    sourceUid: ReturnType<typeof uidFromBuffer>;
+    transactionNumber: number;
+    /** PortId (request) or ResponseType (response) — same byte position, different meaning. */
+    field2: number;
+    messageCount: number;
+    subDevice: number;
+    commandClass: RdmCommandClass;
+    pid: number;
+    parameterData: Buffer;
+};
+
+function decodeRdmFrame(buf: Buffer): DecodedRdmFrame {
     if (buf.length < RDM_MIN_BYTES) {
         throw new RangeError('RDM buffer too short');
     }
@@ -83,7 +163,7 @@ export function decodeRdmResponse(buf: Buffer): RdmResponse {
     const destinationUid = uidFromBuffer(buf, 3);
     const sourceUid = uidFromBuffer(buf, 9);
     const transactionNumber = buf.readUInt8(15);
-    const responseType = buf.readUInt8(16) as RdmResponseType;
+    const field2 = buf.readUInt8(16);
     const messageCount = buf.readUInt8(17);
     const subDevice = buf.readUInt16BE(18);
     const commandClass = buf.readUInt8(20) as RdmCommandClass;
@@ -99,7 +179,7 @@ export function decodeRdmResponse(buf: Buffer): RdmResponse {
         destinationUid,
         sourceUid,
         transactionNumber,
-        responseType,
+        field2,
         messageCount,
         subDevice,
         commandClass,

@@ -6,6 +6,7 @@ import assert from 'assert';
 import {randomUUID} from 'crypto';
 
 import {ACN_PID, ACN_POSTAMBLE_SIZE, ACN_PREAMBLE_SIZE, RdmnetRootVector} from './constants';
+import {assertPduFlags, PDU_FLAGS_NIBBLE, readPduLength, writePduLength} from './pdu';
 
 export type RdmnetPacketOptions = {
     vector: number | RdmnetRootVector;
@@ -20,16 +21,11 @@ export type RdmnetPacket = {
     raw: Buffer;
 };
 
-const FLAGS_MASK = 0x7000;
-const LENGTH_MASK = 0x0fff;
-const ROOT_MIN_LENGTH = 22;
-
-const withLengthFlags = (length: number): number => {
-    if (!Number.isInteger(length) || length < 0 || length > LENGTH_MASK) {
-        throw new RangeError(`PDU length must be 0-${LENGTH_MASK}, got ${length}`);
-    }
-    return FLAGS_MASK | length;
-};
+/** 3-byte flags+length, 4-byte vector, 16-byte CID. */
+const ROOT_HEADER_LENGTH = 23;
+const ROOT_MIN_LENGTH = ROOT_HEADER_LENGTH;
+/** Preamble(2) + Postamble(2) + ACN PID(12) + root header(23). */
+const PACKET_PREFIX_LENGTH = 16 + ROOT_HEADER_LENGTH;
 
 export const makeCid = (): Buffer => Buffer.from(randomUUID().replaceAll('-', ''), 'hex');
 
@@ -43,15 +39,15 @@ export const buildRdmnetPacket = ({vector, data, cid}: RdmnetPacketOptions): Buf
         throw new RangeError(`RDMnet CID must be 16 bytes, got ${packetCid.length}`);
     }
 
-    const rootPduLength = 22 + payload.length;
-    const buffer = Buffer.alloc(38 + payload.length);
+    const rootPduLength = ROOT_HEADER_LENGTH + payload.length;
+    const buffer = Buffer.alloc(16 + rootPduLength);
     buffer.writeUInt16BE(ACN_PREAMBLE_SIZE, 0);
     buffer.writeUInt16BE(ACN_POSTAMBLE_SIZE, 2);
     ACN_PID.copy(buffer, 4);
-    buffer.writeUInt16BE(withLengthFlags(rootPduLength), 16);
-    buffer.writeUInt32BE(vector >>> 0, 18);
-    packetCid.copy(buffer, 22);
-    payload.copy(buffer, 38);
+    writePduLength(buffer, 16, rootPduLength);
+    buffer.writeUInt32BE(vector >>> 0, 19);
+    packetCid.copy(buffer, 23);
+    payload.copy(buffer, PACKET_PREFIX_LENGTH);
     return buffer;
 };
 
@@ -59,19 +55,17 @@ export const buildRdmnetPacket = ({vector, data, cid}: RdmnetPacketOptions): Buf
  * Parse one full ACN Root Layer packet into an RDMnet packet model.
  */
 export const parseRdmnetPacket = (buffer: Buffer): RdmnetPacket => {
-    if (buffer.length < 38) {
-        throw new RangeError(`RDMnet packet too short: expected at least 38 bytes, got ${buffer.length}`);
+    if (buffer.length < PACKET_PREFIX_LENGTH) {
+        throw new RangeError(
+            `RDMnet packet too short: expected at least ${PACKET_PREFIX_LENGTH} bytes, got ${buffer.length}`,
+        );
     }
     assert.strictEqual(buffer.readUInt16BE(0), ACN_PREAMBLE_SIZE);
     assert.strictEqual(buffer.readUInt16BE(2), ACN_POSTAMBLE_SIZE);
     assert.deepStrictEqual(buffer.subarray(4, 16), ACN_PID);
 
-    const rootFl = buffer.readUInt16BE(16);
-    const flags = rootFl & FLAGS_MASK;
-    if (flags !== FLAGS_MASK) {
-        throw new RangeError(`Invalid RDMnet flags 0x${flags.toString(16)} (expected 0x7000)`);
-    }
-    const rootLength = rootFl & LENGTH_MASK;
+    const {flagsNibble, length: rootLength} = readPduLength(buffer, 16);
+    assertPduFlags(flagsNibble, 'RDMnet root layer');
     if (rootLength < ROOT_MIN_LENGTH) {
         throw new RangeError(`Invalid RDMnet root length ${rootLength}: must be >= ${ROOT_MIN_LENGTH}`);
     }
@@ -83,9 +77,9 @@ export const parseRdmnetPacket = (buffer: Buffer): RdmnetPacket => {
         throw new RangeError(`RDMnet packet has trailing bytes: expected ${totalLength} bytes, got ${buffer.length}`);
     }
 
-    const vector = buffer.readUInt32BE(18);
-    const cid = Buffer.from(buffer.subarray(22, 38));
-    const data = Buffer.from(buffer.subarray(38, totalLength));
+    const vector = buffer.readUInt32BE(19);
+    const cid = Buffer.from(buffer.subarray(23, 39));
+    const data = Buffer.from(buffer.subarray(PACKET_PREFIX_LENGTH, totalLength));
     return {
         vector,
         cid,
@@ -104,18 +98,16 @@ export const extractRdmnetPackets = (
     const packets: RdmnetPacket[] = [];
     let offset = 0;
 
-    while (offset + 38 <= streamBuffer.length) {
+    while (offset + PACKET_PREFIX_LENGTH <= streamBuffer.length) {
         const preamble = streamBuffer.readUInt16BE(offset);
         const postamble = streamBuffer.readUInt16BE(offset + 2);
         if (preamble !== ACN_PREAMBLE_SIZE || postamble !== ACN_POSTAMBLE_SIZE) {
             throw new Error(`Invalid ACN framing at offset ${offset}`);
         }
-        const rootFl = streamBuffer.readUInt16BE(offset + 16);
-        const flags = rootFl & FLAGS_MASK;
-        if (flags !== FLAGS_MASK) {
-            throw new Error(`Invalid RDMnet flags 0x${flags.toString(16)} at offset ${offset}`);
+        const {flagsNibble, length: rootLength} = readPduLength(streamBuffer, offset + 16);
+        if (flagsNibble !== PDU_FLAGS_NIBBLE) {
+            throw new Error(`Invalid RDMnet flags 0x${flagsNibble.toString(16)} at offset ${offset}`);
         }
-        const rootLength = rootFl & LENGTH_MASK;
         if (rootLength < ROOT_MIN_LENGTH) {
             throw new Error(`Invalid RDMnet root length ${rootLength} at offset ${offset}`);
         }

@@ -2,6 +2,7 @@ import {describe, expect, it} from 'vitest';
 
 import {Packet} from '../src';
 import {bit, dp, empty, inRange, multicastGroup, objectify} from '../src/protocols/sacn/util';
+import {buildSyncPacket, buildUniverseDiscoveryPacket, parseSyncPacket, parseUniverseDiscoveryPacket} from '../src/protocols/sacn/extended';
 
 describe('sACN util', () => {
     it('builds multicast groups for valid universes', () => {
@@ -116,5 +117,46 @@ describe('sACN Packet', () => {
     it('rejects invalid constructor inputs', () => {
         expect(() => new Packet(Buffer.alloc(100))).toThrow(RangeError);
         expect(() => new Packet(undefined as never)).toThrow('Packet instantiated with no input');
+    });
+});
+
+describe('sACN extended packets', () => {
+    it('builds and parses a Synchronization Packet', () => {
+        const cid = Buffer.alloc(16, 0x42);
+        const packet = buildSyncPacket({cid, sequence: 9, syncAddress: 5});
+        expect(packet.length).toBe(49);
+
+        const parsed = parseSyncPacket(packet);
+        expect(parsed.cid).toEqual(cid);
+        expect(parsed.sequence).toBe(9);
+        expect(parsed.syncAddress).toBe(5);
+    });
+
+    it('rejects an out-of-range sync address', () => {
+        expect(() => buildSyncPacket({cid: Buffer.alloc(16), sequence: 0, syncAddress: 0})).toThrow(RangeError);
+        expect(() => buildSyncPacket({cid: Buffer.alloc(16), sequence: 0, syncAddress: 64000})).toThrow(RangeError);
+    });
+
+    it('builds and parses a single-page Universe Discovery Packet', () => {
+        const cid = Buffer.alloc(16, 0x11);
+        const packet = buildUniverseDiscoveryPacket({
+            cid,
+            sourceName: 'node-dmx-test',
+            page: 0,
+            lastPage: 0,
+            universes: [1, 2, 3, 500],
+        });
+
+        const parsed = parseUniverseDiscoveryPacket(packet);
+        expect(parsed.cid).toEqual(cid);
+        expect(parsed.sourceName).toBe('node-dmx-test');
+        expect(parsed.page).toBe(0);
+        expect(parsed.lastPage).toBe(0);
+        expect(parsed.universes).toEqual([1, 2, 3, 500]);
+    });
+
+    it('rejects a discovery page exceeding the max universe count', () => {
+        const universes = Array.from({length: 513}, (_, i) => i + 1);
+        expect(() => buildUniverseDiscoveryPacket({cid: Buffer.alloc(16), page: 0, lastPage: 0, universes})).toThrow(RangeError);
     });
 });

@@ -62,9 +62,37 @@ export enum DmpVector {
     DATA = 0x00000002,
 }
 
-// Note: Extended frame vectors (e.g., SYNC, DISCOVERY) are defined in E1.31 Annex A
-// but are rarely implemented. Uncomment if needed:
-// export enum ExtendedFrameVector {
-//   SYNC = 1,
-//   DISCOVERY = 2,
-// }
+/**
+ * Extended (root vector {@link RootVector.EXTENDED}) framing layer vectors
+ * (E1.31 Section 4/8: Synchronization Packet, Universe Discovery Packet).
+ */
+export enum ExtendedFrameVector {
+    /** Synchronization Packet (E1.31 Section 6). */
+    SYNCHRONIZATION = 0x00000001,
+    /** Universe Discovery Packet (E1.31 Section 8). */
+    DISCOVERY = 0x00000002,
+}
+
+/** Universe Discovery Layer vector (E1.31 Section 8.4). */
+export enum UniverseDiscoveryVector {
+    UNIVERSE_LIST = 0x00000001,
+}
+
+/** Well-known multicast universe used for Universe Discovery packets (239.255.250.214). */
+export const DISCOVERY_UNIVERSE = 64214;
+/** Nominal resend interval for Universe Discovery packets (E1.31 Section 8.6). */
+export const DISCOVERY_INTERVAL_MS = 10000;
+/** Maximum universe entries per Universe Discovery page (E1.31 Section 8.5). */
+export const MAX_UNIVERSES_PER_DISCOVERY_PAGE = 512;
+
+/**
+ * Framing layer Options bitfield (E1.31 Section 6.2.6).
+ */
+export enum FrameOptions {
+    /** Bit 7: Preview_Data - packet is intended for visualization, not live output. */
+    PREVIEW_DATA = 0x80,
+    /** Bit 6: Stream_Terminated - source is terminating transmission of this universe. */
+    STREAM_TERMINATED = 0x40,
+    /** Bit 5: Force_Synchronization - allow output without waiting for sync packet. */
+    FORCE_SYNCHRONIZATION = 0x20,
+}

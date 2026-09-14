@@ -1,453 +1,350 @@
 /**
- * RDMnet broker/session message helpers.
+ * ANSI E1.33 (RDMnet) Broker PDU (root vector {@link RdmnetRootVector.Broker}).
  * @module rdmnet/broker
+ *
+ * Verified against ETCLabs/RDMnet `src/rdmnet/core/broker_prot.c` and
+ * `include/rdmnet/defs.h` (pack functions + field-size constants read
+ * directly from source, not guessed).
  */
+import type {UID} from '../artnet/rdm/uid';
+import {uidFromBuffer, uidToBuffer} from '../artnet/rdm/uid';
+import {assertPduFlags, readFixedString, readPduLength, writeFixedString, writePduLength} from './pdu';
 
+/** Broker PDU vectors (defs.h). */
 export enum BrokerVector {
-    ConnectRequest = 0x00000001,
-    ConnectReply = 0x00000002,
-    ClientBindRequest = 0x00000003,
-    ClientBindReply = 0x00000004,
-    Heartbeat = 0x00000005,
-    Disconnect = 0x00000006,
-    ClientListRequest = 0x00000007,
-    ClientListReply = 0x00000008,
-    EndpointListRequest = 0x00000009,
-    EndpointListReply = 0x0000000a,
+    Connect = 0x0001,
+    ConnectReply = 0x0002,
+    ClientEntryUpdate = 0x0003,
+    RedirectV4 = 0x0004,
+    RedirectV6 = 0x0005,
+    FetchClientList = 0x0006,
+    ConnectedClientList = 0x0007,
+    ClientAdd = 0x0008,
+    ClientRemove = 0x0009,
+    ClientEntryChange = 0x000a,
+    Disconnect = 0x000e,
+    /** Heartbeat/keepalive; empty payload. */
+    Null = 0x000f,
 }
 
-export enum BrokerClientRole {
-    Controller = 0x01,
-    Device = 0x02,
-    Monitor = 0x03,
+/** Client Protocol carried in a Client Entry header. Only RPT is implemented. */
+export enum ClientProtocol {
+    Rpt = 0x00000005,
+    Ept = 0x0000000b,
 }
 
-export enum BrokerStatusCode {
+/** RPT Client Type (defs.h). */
+export enum RptClientType {
+    Device = 0x0000,
+    Controller = 0x0001,
+}
+
+/** Broker Connection Status codes (Connect Reply, defs.h). */
+export enum ConnectionStatusCode {
     Ok = 0x0000,
-    Rejected = 0x0001,
-    InvalidScope = 0x0002,
-    Unauthorized = 0x0003,
-    AlreadyConnected = 0x0004,
-    InvalidRequest = 0x0005,
+    ScopeMismatch = 0x0001,
+    CapacityExceeded = 0x0002,
+    DuplicateUid = 0x0003,
+    InvalidClientEntry = 0x0004,
+    InvalidUid = 0x0005,
 }
 
-export enum BrokerDisconnectReason {
-    Graceful = 0x0000,
-    BrokerShutdown = 0x0001,
-    Timeout = 0x0002,
-    ProtocolError = 0x0003,
+/** Broker Disconnect reason codes (defs.h). */
+export enum DisconnectReason {
+    Shutdown = 0x0000,
+    CapacityExhausted = 0x0001,
+    HardwareFault = 0x0002,
+    SoftwareFault = 0x0003,
+    SoftwareReset = 0x0004,
+    IncorrectScope = 0x0005,
+    RptReconfigure = 0x0006,
+    LlrpReconfigure = 0x0007,
+    UserReconfigure = 0x0008,
 }
 
-export enum BrokerSessionState {
-    Disconnected = 'disconnected',
-    TcpConnected = 'tcp_connected',
-    Connecting = 'broker_connecting',
-    Connected = 'broker_connected',
-    Binding = 'broker_binding',
-    Bound = 'broker_bound',
-    Error = 'broker_error',
-}
+/** Fixed field widths (E1.33 §6.2.1/6.3.1.2, defs.h). */
+export const E133_SCOPE_STRING_PADDED_LENGTH = 63;
+export const E133_DOMAIN_STRING_PADDED_LENGTH = 231;
+/** Current E1.33 protocol version number. */
+export const E133_VERSION = 1;
+export const DEFAULT_SCOPE = 'default';
 
-export class BrokerStatusError extends Error {
-    public readonly code: BrokerStatusCode;
+/** Connect Flags bit 0 (Client Connect / Client Entry Update). */
+const CONNECT_FLAG_INCREMENTAL_UPDATES = 0x01;
 
-    constructor(code: BrokerStatusCode, message?: string) {
-        super(message ?? `Broker returned status code ${code}`);
-        this.name = 'BrokerStatusError';
-        this.code = code;
-    }
-}
+export type RptClientEntry = {
+    clientProtocol: ClientProtocol.Rpt;
+    /** Component identifier of the client owning this entry. */
+    cid: Buffer;
+    uid: UID;
+    clientType: RptClientType;
+    /** All-zero when this client does not act as a proxy for another component. */
+    bindingCid: Buffer;
+};
 
-export type BrokerConnectRequest = {
-    vector: BrokerVector.ConnectRequest;
-    sequence: number;
-    role: BrokerClientRole;
+export type BrokerConnectMessage = {
+    vector: BrokerVector.Connect;
     scope: string;
+    e133Version?: number;
+    searchDomain?: string;
+    incrementalUpdates?: boolean;
+    clientEntry: RptClientEntry;
 };
 
-export type BrokerConnectReply = {
+export type BrokerConnectReplyMessage = {
     vector: BrokerVector.ConnectReply;
-    sequence: number;
-    statusCode: BrokerStatusCode;
-    clientId: number;
-    text?: string;
+    connectionStatus: ConnectionStatusCode;
+    e133Version: number;
+    brokerUid: UID;
+    clientUid: UID;
 };
 
-export type BrokerBindRequest = {
-    vector: BrokerVector.ClientBindRequest;
-    sequence: number;
-    endpointId: number;
-    requestedRole?: BrokerClientRole;
-    profiles?: number[];
+export type BrokerClientEntryUpdateMessage = {
+    vector: BrokerVector.ClientEntryUpdate;
+    incrementalUpdates?: boolean;
+    clientEntry: RptClientEntry;
 };
 
-export type BrokerBindReply = {
-    vector: BrokerVector.ClientBindReply;
-    sequence: number;
-    statusCode: BrokerStatusCode;
-    endpointId: number;
-    negotiatedRole?: BrokerClientRole;
-    negotiatedProfile?: number;
-    text?: string;
-};
+export type BrokerConnectedClientListMessage = {vector: BrokerVector.ConnectedClientList; clients: RptClientEntry[]};
+export type BrokerClientAddMessage = {vector: BrokerVector.ClientAdd; clients: RptClientEntry[]};
+export type BrokerClientRemoveMessage = {vector: BrokerVector.ClientRemove; clients: RptClientEntry[]};
+export type BrokerClientEntryChangeMessage = {vector: BrokerVector.ClientEntryChange; clients: RptClientEntry[]};
+export type BrokerClientListMessage =
+    | BrokerConnectedClientListMessage
+    | BrokerClientAddMessage
+    | BrokerClientRemoveMessage
+    | BrokerClientEntryChangeMessage;
 
-export type BrokerHeartbeatMessage = {
-    vector: BrokerVector.Heartbeat;
-    sequence: number;
-};
+export type BrokerFetchClientListMessage = {vector: BrokerVector.FetchClientList};
+export type BrokerNullMessage = {vector: BrokerVector.Null};
 
 export type BrokerDisconnectMessage = {
     vector: BrokerVector.Disconnect;
-    sequence: number;
-    reason: BrokerDisconnectReason;
-    text?: string;
+    reason: DisconnectReason;
 };
 
-export type BrokerClientListRequest = {
-    vector: BrokerVector.ClientListRequest;
-    sequence: number;
-};
-
-export type BrokerClientListReply = {
-    vector: BrokerVector.ClientListReply;
-    sequence: number;
-    statusCode: BrokerStatusCode;
-    clients: number[];
-};
-
-export type BrokerEndpointListRequest = {
-    vector: BrokerVector.EndpointListRequest;
-    sequence: number;
-};
-
-export type BrokerEndpointListReply = {
-    vector: BrokerVector.EndpointListReply;
-    sequence: number;
-    statusCode: BrokerStatusCode;
-    endpoints: number[];
+export type BrokerRedirectMessage = {
+    vector: BrokerVector.RedirectV4;
+    /** Dotted-quad IPv4 address. */
+    address: string;
+    port: number;
 };
 
 export type BrokerMessage =
-    | BrokerConnectRequest
-    | BrokerConnectReply
-    | BrokerBindRequest
-    | BrokerBindReply
-    | BrokerHeartbeatMessage
+    | BrokerConnectMessage
+    | BrokerConnectReplyMessage
+    | BrokerClientEntryUpdateMessage
+    | BrokerClientListMessage
+    | BrokerFetchClientListMessage
+    | BrokerNullMessage
     | BrokerDisconnectMessage
-    | BrokerClientListRequest
-    | BrokerClientListReply
-    | BrokerEndpointListRequest
-    | BrokerEndpointListReply;
+    | BrokerRedirectMessage;
 
-const VALID_BROKER_ROLES = new Set<number>([
-    BrokerClientRole.Controller,
-    BrokerClientRole.Device,
-    BrokerClientRole.Monitor,
-]);
+const BROKER_HEADER_LENGTH = 5;
+/** Client Entry header: flags+length(3) + client protocol vector(4) + CID(16). */
+const CLIENT_ENTRY_HEADER_LENGTH = 23;
+/** RPT Client Entry Data: UID(6) + Client Type(1) + Binding CID(16). */
+const RPT_CLIENT_ENTRY_DATA_LENGTH = 23;
+const RPT_CLIENT_ENTRY_LENGTH = CLIENT_ENTRY_HEADER_LENGTH + RPT_CLIENT_ENTRY_DATA_LENGTH;
 
-const VALID_BROKER_STATUS_CODES = new Set<number>([
-    BrokerStatusCode.Ok,
-    BrokerStatusCode.Rejected,
-    BrokerStatusCode.InvalidScope,
-    BrokerStatusCode.Unauthorized,
-    BrokerStatusCode.AlreadyConnected,
-    BrokerStatusCode.InvalidRequest,
-]);
-
-const VALID_BROKER_DISCONNECT_REASONS = new Set<number>([
-    BrokerDisconnectReason.Graceful,
-    BrokerDisconnectReason.BrokerShutdown,
-    BrokerDisconnectReason.Timeout,
-    BrokerDisconnectReason.ProtocolError,
-]);
-
-function writeTextBlock(buffer: Buffer, offset: number, text?: string): number {
-    const bytes = Buffer.from(text ?? '', 'utf8');
-    buffer.writeUInt16BE(bytes.length & 0xffff, offset);
-    bytes.copy(buffer, offset + 2);
-    return 2 + bytes.length;
-}
-
-function readTextBlock(buffer: Buffer, offset: number): string {
-    if (offset + 2 > buffer.length) return '';
-    const length = buffer.readUInt16BE(offset);
-    if (offset + 2 + length > buffer.length) {
-        throw new RangeError('Broker text block exceeds packet length');
+function encodeClientEntry(entry: RptClientEntry): Buffer {
+    if (entry.cid.length !== 16) throw new RangeError(`Client Entry CID must be 16 bytes, got ${entry.cid.length}`);
+    if (entry.bindingCid.length !== 16) {
+        throw new RangeError(`Client Entry binding CID must be 16 bytes, got ${entry.bindingCid.length}`);
     }
-    return buffer.toString('utf8', offset + 2, offset + 2 + length);
+    const buf = Buffer.alloc(RPT_CLIENT_ENTRY_LENGTH);
+    writePduLength(buf, 0, RPT_CLIENT_ENTRY_LENGTH);
+    buf.writeUInt32BE(ClientProtocol.Rpt, 3);
+    entry.cid.copy(buf, 7);
+    uidToBuffer(entry.uid).copy(buf, 23);
+    buf.writeUInt8(entry.clientType, 29);
+    entry.bindingCid.copy(buf, 30);
+    return buf;
 }
 
+function decodeClientEntry(buf: Buffer, offset: number): {entry: RptClientEntry; length: number} {
+    if (offset + CLIENT_ENTRY_HEADER_LENGTH > buf.length) {
+        throw new RangeError('Client Entry header truncated');
+    }
+    const {flagsNibble, length} = readPduLength(buf, offset);
+    assertPduFlags(flagsNibble, 'Client Entry');
+    if (offset + length > buf.length) throw new RangeError('Client Entry PDU exceeds buffer');
+    const clientProtocol = buf.readUInt32BE(offset + 3);
+    const cid = Buffer.from(buf.subarray(offset + 7, offset + 23));
+    if (clientProtocol !== ClientProtocol.Rpt) {
+        throw new Error(`Unsupported client protocol 0x${clientProtocol.toString(16)} (only RPT client entries are supported)`);
+    }
+    if (length < RPT_CLIENT_ENTRY_LENGTH) throw new RangeError('RPT Client Entry too short');
+    const uid = uidFromBuffer(buf, offset + 23);
+    const clientType = buf.readUInt8(offset + 29) as RptClientType;
+    const bindingCid = Buffer.from(buf.subarray(offset + 30, offset + 46));
+    return {entry: {clientProtocol: ClientProtocol.Rpt, cid, uid, clientType, bindingCid}, length};
+}
+
+function writeBrokerHeader(buf: Buffer, vector: BrokerVector, totalLength: number): void {
+    writePduLength(buf, 0, totalLength);
+    buf.writeUInt16BE(vector, 3);
+}
+
+/** Build wire bytes for one Broker message (data placed after the 23-byte root layer by the caller). */
 export const encodeBrokerMessage = (message: BrokerMessage): Buffer => {
-    if (message.vector === BrokerVector.ConnectRequest) {
-        const scopeBytes = Buffer.from(message.scope, 'utf8');
-        const out = Buffer.alloc(12 + scopeBytes.length);
-        out.writeUInt32BE(message.vector, 0);
-        out.writeUInt32BE(message.sequence >>> 0, 4);
-        out.writeUInt8(message.role & 0xff, 8);
-        out.writeUInt8(0, 9);
-        out.writeUInt16BE(scopeBytes.length & 0xffff, 10);
-        scopeBytes.copy(out, 12);
-        return out;
-    }
-
-    if (message.vector === BrokerVector.ConnectReply) {
-        const textBytes = Buffer.from(message.text ?? '', 'utf8');
-        const out = Buffer.alloc(14 + textBytes.length);
-        out.writeUInt32BE(message.vector, 0);
-        out.writeUInt32BE(message.sequence >>> 0, 4);
-        out.writeUInt16BE(message.statusCode & 0xffff, 8);
-        out.writeUInt32BE(message.clientId >>> 0, 10);
-        textBytes.copy(out, 14);
-        return out;
-    }
-
-    if (message.vector === BrokerVector.ClientBindRequest) {
-        const profiles = message.profiles ?? [];
-        if (profiles.length > 255) {
-            throw new RangeError(`Broker bind profiles max length is 255, got ${profiles.length}`);
+    switch (message.vector) {
+        case BrokerVector.Connect: {
+            const entryBuf = encodeClientEntry(message.clientEntry);
+            const total =
+                BROKER_HEADER_LENGTH +
+                E133_SCOPE_STRING_PADDED_LENGTH +
+                2 +
+                E133_DOMAIN_STRING_PADDED_LENGTH +
+                1 +
+                entryBuf.length;
+            const buf = Buffer.alloc(total);
+            writeBrokerHeader(buf, BrokerVector.Connect, total);
+            let offset = BROKER_HEADER_LENGTH;
+            writeFixedString(buf, offset, E133_SCOPE_STRING_PADDED_LENGTH, message.scope || DEFAULT_SCOPE);
+            offset += E133_SCOPE_STRING_PADDED_LENGTH;
+            buf.writeUInt16BE(message.e133Version ?? E133_VERSION, offset);
+            offset += 2;
+            writeFixedString(buf, offset, E133_DOMAIN_STRING_PADDED_LENGTH, message.searchDomain ?? '');
+            offset += E133_DOMAIN_STRING_PADDED_LENGTH;
+            buf.writeUInt8(message.incrementalUpdates ? CONNECT_FLAG_INCREMENTAL_UPDATES : 0, offset);
+            offset += 1;
+            entryBuf.copy(buf, offset);
+            return buf;
         }
-        const out = Buffer.alloc(12 + profiles.length * 2);
-        out.writeUInt32BE(message.vector, 0);
-        out.writeUInt32BE(message.sequence >>> 0, 4);
-        out.writeUInt16BE(message.endpointId & 0xffff, 8);
-        out.writeUInt8((message.requestedRole ?? BrokerClientRole.Controller) & 0xff, 10);
-        out.writeUInt8(profiles.length & 0xff, 11);
-        for (let i = 0; i < profiles.length; i++) {
-            out.writeUInt16BE(profiles[i]! & 0xffff, 12 + i * 2);
+        case BrokerVector.ConnectReply: {
+            const total = BROKER_HEADER_LENGTH + 16;
+            const buf = Buffer.alloc(total);
+            writeBrokerHeader(buf, BrokerVector.ConnectReply, total);
+            buf.writeUInt16BE(message.connectionStatus, 5);
+            buf.writeUInt16BE(message.e133Version, 7);
+            uidToBuffer(message.brokerUid).copy(buf, 9);
+            uidToBuffer(message.clientUid).copy(buf, 15);
+            return buf;
         }
-        return out;
-    }
-
-    if (message.vector === BrokerVector.ClientBindReply) {
-        const textBytes = Buffer.from(message.text ?? '', 'utf8');
-        const out = Buffer.alloc(18 + textBytes.length);
-        out.writeUInt32BE(message.vector, 0);
-        out.writeUInt32BE(message.sequence >>> 0, 4);
-        out.writeUInt16BE(message.statusCode & 0xffff, 8);
-        out.writeUInt16BE(message.endpointId & 0xffff, 10);
-        out.writeUInt8((message.negotiatedRole ?? BrokerClientRole.Controller) & 0xff, 12);
-        out.writeUInt8(0, 13);
-        out.writeUInt16BE((message.negotiatedProfile ?? 0) & 0xffff, 14);
-        out.writeUInt16BE(textBytes.length & 0xffff, 16);
-        textBytes.copy(out, 18);
-        return out;
-    }
-
-    if (message.vector === BrokerVector.Heartbeat) {
-        const out = Buffer.alloc(8);
-        out.writeUInt32BE(message.vector, 0);
-        out.writeUInt32BE(message.sequence >>> 0, 4);
-        return out;
-    }
-
-    if (message.vector === BrokerVector.ClientListRequest || message.vector === BrokerVector.EndpointListRequest) {
-        const out = Buffer.alloc(8);
-        out.writeUInt32BE(message.vector, 0);
-        out.writeUInt32BE(message.sequence >>> 0, 4);
-        return out;
-    }
-
-    if (message.vector === BrokerVector.ClientListReply) {
-        if (message.clients.length > 255) {
-            throw new RangeError(`Broker client list max length is 255, got ${message.clients.length}`);
+        case BrokerVector.ClientEntryUpdate: {
+            const entryBuf = encodeClientEntry(message.clientEntry);
+            const total = BROKER_HEADER_LENGTH + 1 + entryBuf.length;
+            const buf = Buffer.alloc(total);
+            writeBrokerHeader(buf, BrokerVector.ClientEntryUpdate, total);
+            buf.writeUInt8(message.incrementalUpdates ? CONNECT_FLAG_INCREMENTAL_UPDATES : 0, 5);
+            entryBuf.copy(buf, 6);
+            return buf;
         }
-        const out = Buffer.alloc(11 + message.clients.length * 4);
-        out.writeUInt32BE(message.vector, 0);
-        out.writeUInt32BE(message.sequence >>> 0, 4);
-        out.writeUInt16BE(message.statusCode & 0xffff, 8);
-        out.writeUInt8(message.clients.length & 0xff, 10);
-        for (let i = 0; i < message.clients.length; i++) {
-            out.writeUInt32BE(message.clients[i]! >>> 0, 11 + i * 4);
+        case BrokerVector.ConnectedClientList:
+        case BrokerVector.ClientAdd:
+        case BrokerVector.ClientRemove:
+        case BrokerVector.ClientEntryChange: {
+            const entryBufs = message.clients.map(encodeClientEntry);
+            const total = BROKER_HEADER_LENGTH + entryBufs.reduce((sum, b) => sum + b.length, 0);
+            const buf = Buffer.alloc(total);
+            writeBrokerHeader(buf, message.vector, total);
+            let offset = BROKER_HEADER_LENGTH;
+            for (const entryBuf of entryBufs) {
+                entryBuf.copy(buf, offset);
+                offset += entryBuf.length;
+            }
+            return buf;
         }
-        return out;
+        case BrokerVector.FetchClientList:
+        case BrokerVector.Null: {
+            const buf = Buffer.alloc(BROKER_HEADER_LENGTH);
+            writeBrokerHeader(buf, message.vector, BROKER_HEADER_LENGTH);
+            return buf;
+        }
+        case BrokerVector.Disconnect: {
+            const buf = Buffer.alloc(BROKER_HEADER_LENGTH + 2);
+            writeBrokerHeader(buf, BrokerVector.Disconnect, buf.length);
+            buf.writeUInt16BE(message.reason, 5);
+            return buf;
+        }
+        case BrokerVector.RedirectV4: {
+            const buf = Buffer.alloc(BROKER_HEADER_LENGTH + 6);
+            writeBrokerHeader(buf, BrokerVector.RedirectV4, buf.length);
+            const parts = message.address.split('.').map(Number);
+            if (parts.length !== 4 || parts.some((p) => !Number.isInteger(p) || p < 0 || p > 255)) {
+                throw new RangeError(`Invalid IPv4 address "${message.address}"`);
+            }
+            for (let i = 0; i < 4; i++) buf.writeUInt8(parts[i]!, 5 + i);
+            buf.writeUInt16BE(message.port, 9);
+            return buf;
+        }
+        default:
+            throw new Error('Unsupported broker message');
     }
-
-    if (message.vector === BrokerVector.EndpointListReply) {
-        if (message.endpoints.length > 255) {
-            throw new RangeError(`Broker endpoint list max length is 255, got ${message.endpoints.length}`);
-        }
-        const out = Buffer.alloc(11 + message.endpoints.length * 2);
-        out.writeUInt32BE(message.vector, 0);
-        out.writeUInt32BE(message.sequence >>> 0, 4);
-        out.writeUInt16BE(message.statusCode & 0xffff, 8);
-        out.writeUInt8(message.endpoints.length & 0xff, 10);
-        for (let i = 0; i < message.endpoints.length; i++) {
-            out.writeUInt16BE(message.endpoints[i]! & 0xffff, 11 + i * 2);
-        }
-        return out;
-    }
-
-    const out = Buffer.alloc(12 + Buffer.byteLength(message.text ?? '', 'utf8'));
-    out.writeUInt32BE(message.vector, 0);
-    out.writeUInt32BE(message.sequence >>> 0, 4);
-    out.writeUInt16BE(message.reason & 0xffff, 8);
-    writeTextBlock(out, 10, message.text);
-    return out;
 };
 
-export const decodeBrokerMessage = (buffer: Buffer): BrokerMessage => {
-    if (buffer.length < 8) {
-        throw new RangeError(`Broker message too short: ${buffer.length}`);
-    }
-    const vector = buffer.readUInt32BE(0);
-    const sequence = buffer.readUInt32BE(4);
+/** Parse one Broker PDU's bytes (as produced by {@link encodeBrokerMessage}). */
+export const decodeBrokerMessage = (buf: Buffer): BrokerMessage => {
+    if (buf.length < BROKER_HEADER_LENGTH) throw new RangeError('Broker PDU too short');
+    const {flagsNibble, length} = readPduLength(buf, 0);
+    assertPduFlags(flagsNibble, 'Broker PDU');
+    if (length > buf.length) throw new RangeError('Broker PDU length exceeds buffer');
+    const vector = buf.readUInt16BE(3) as BrokerVector;
+    const data = buf.subarray(BROKER_HEADER_LENGTH, length);
 
-    if (vector === BrokerVector.ConnectRequest) {
-        if (buffer.length < 12) throw new RangeError('Broker connect request too short');
-        const roleRaw = buffer.readUInt8(8);
-        if (!VALID_BROKER_ROLES.has(roleRaw)) {
-            throw new RangeError(`Broker connect request has invalid role ${roleRaw}`);
+    switch (vector) {
+        case BrokerVector.Connect: {
+            const minLen = E133_SCOPE_STRING_PADDED_LENGTH + 2 + E133_DOMAIN_STRING_PADDED_LENGTH + 1;
+            if (data.length < minLen) throw new RangeError('Broker Connect message too short');
+            let offset = 0;
+            const scope = readFixedString(data, offset, E133_SCOPE_STRING_PADDED_LENGTH);
+            offset += E133_SCOPE_STRING_PADDED_LENGTH;
+            const e133Version = data.readUInt16BE(offset);
+            offset += 2;
+            const searchDomain = readFixedString(data, offset, E133_DOMAIN_STRING_PADDED_LENGTH);
+            offset += E133_DOMAIN_STRING_PADDED_LENGTH;
+            const incrementalUpdates = (data.readUInt8(offset) & CONNECT_FLAG_INCREMENTAL_UPDATES) !== 0;
+            offset += 1;
+            const {entry} = decodeClientEntry(data, offset);
+            return {vector, scope, e133Version, searchDomain, incrementalUpdates, clientEntry: entry};
         }
-        if (buffer.readUInt8(9) !== 0) {
-            throw new RangeError('Broker connect request reserved byte must be 0');
+        case BrokerVector.ConnectReply: {
+            if (data.length < 16) throw new RangeError('Broker Connect Reply message too short');
+            return {
+                vector,
+                connectionStatus: data.readUInt16BE(0),
+                e133Version: data.readUInt16BE(2),
+                brokerUid: uidFromBuffer(data, 4),
+                clientUid: uidFromBuffer(data, 10),
+            };
         }
-        const scopeLength = buffer.readUInt16BE(10);
-        if (12 + scopeLength > buffer.length) throw new RangeError('Broker connect request scope exceeds packet length');
-        if (12 + scopeLength !== buffer.length) throw new RangeError('Broker connect request has trailing bytes');
-        return {
-            vector,
-            sequence,
-            role: roleRaw as BrokerClientRole,
-            scope: buffer.toString('utf8', 12, 12 + scopeLength),
-        };
+        case BrokerVector.ClientEntryUpdate: {
+            if (data.length < 1) throw new RangeError('Broker Client Entry Update message too short');
+            const incrementalUpdates = (data.readUInt8(0) & CONNECT_FLAG_INCREMENTAL_UPDATES) !== 0;
+            const {entry} = decodeClientEntry(data, 1);
+            return {vector, incrementalUpdates, clientEntry: entry};
+        }
+        case BrokerVector.ConnectedClientList:
+        case BrokerVector.ClientAdd:
+        case BrokerVector.ClientRemove:
+        case BrokerVector.ClientEntryChange: {
+            const clients: RptClientEntry[] = [];
+            let offset = 0;
+            while (offset < data.length) {
+                const {entry, length: entryLength} = decodeClientEntry(data, offset);
+                clients.push(entry);
+                offset += entryLength;
+            }
+            return {vector, clients};
+        }
+        case BrokerVector.FetchClientList:
+            return {vector};
+        case BrokerVector.Null:
+            return {vector};
+        case BrokerVector.Disconnect: {
+            if (data.length < 2) throw new RangeError('Broker Disconnect message too short');
+            return {vector, reason: data.readUInt16BE(0)};
+        }
+        case BrokerVector.RedirectV4: {
+            if (data.length < 6) throw new RangeError('Broker Redirect V4 message too short');
+            return {
+                vector,
+                address: `${data[0]}.${data[1]}.${data[2]}.${data[3]}`,
+                port: data.readUInt16BE(4),
+            };
+        }
+        default:
+            throw new Error(`Unsupported broker vector 0x${vector.toString(16)}`);
     }
-
-    if (vector === BrokerVector.ConnectReply) {
-        if (buffer.length < 14) throw new RangeError('Broker connect reply too short');
-        const statusCode = buffer.readUInt16BE(8);
-        if (!VALID_BROKER_STATUS_CODES.has(statusCode)) {
-            throw new RangeError(`Broker connect reply has invalid status code ${statusCode}`);
-        }
-        return {
-            vector,
-            sequence,
-            statusCode: statusCode as BrokerStatusCode,
-            clientId: buffer.readUInt32BE(10),
-            text: buffer.length > 14 ? buffer.toString('utf8', 14) : '',
-        };
-    }
-
-    if (vector === BrokerVector.ClientBindRequest) {
-        if (buffer.length < 12) throw new RangeError('Broker bind request too short');
-        const requestedRole = buffer.readUInt8(10);
-        if (!VALID_BROKER_ROLES.has(requestedRole)) {
-            throw new RangeError(`Broker bind request has invalid role ${requestedRole}`);
-        }
-        const profileCount = buffer.readUInt8(11);
-        if (12 + profileCount * 2 > buffer.length) {
-            throw new RangeError('Broker bind request profile list exceeds packet length');
-        }
-        if (12 + profileCount * 2 !== buffer.length) {
-            throw new RangeError('Broker bind request has trailing bytes');
-        }
-        const profiles: number[] = [];
-        for (let i = 0; i < profileCount; i++) {
-            profiles.push(buffer.readUInt16BE(12 + i * 2));
-        }
-        return {
-            vector,
-            sequence,
-            endpointId: buffer.readUInt16BE(8),
-            requestedRole: requestedRole as BrokerClientRole,
-            profiles,
-        };
-    }
-
-    if (vector === BrokerVector.ClientBindReply) {
-        if (buffer.length < 18) throw new RangeError('Broker bind reply too short');
-        const statusCode = buffer.readUInt16BE(8);
-        if (!VALID_BROKER_STATUS_CODES.has(statusCode)) {
-            throw new RangeError(`Broker bind reply has invalid status code ${statusCode}`);
-        }
-        const negotiatedRole = buffer.readUInt8(12);
-        if (!VALID_BROKER_ROLES.has(negotiatedRole)) {
-            throw new RangeError(`Broker bind reply has invalid role ${negotiatedRole}`);
-        }
-        if (buffer.readUInt8(13) !== 0) {
-            throw new RangeError('Broker bind reply reserved byte must be 0');
-        }
-        const textLength = buffer.readUInt16BE(16);
-        if (18 + textLength > buffer.length) throw new RangeError('Broker bind reply text exceeds packet length');
-        if (18 + textLength !== buffer.length) throw new RangeError('Broker bind reply has trailing bytes');
-        return {
-            vector,
-            sequence,
-            statusCode: statusCode as BrokerStatusCode,
-            endpointId: buffer.readUInt16BE(10),
-            negotiatedRole: negotiatedRole as BrokerClientRole,
-            negotiatedProfile: buffer.readUInt16BE(14),
-            text: buffer.toString('utf8', 18, 18 + textLength),
-        };
-    }
-
-    if (vector === BrokerVector.Heartbeat) {
-        if (buffer.length !== 8) throw new RangeError('Broker heartbeat has invalid length');
-        return {vector, sequence};
-    }
-
-    if (vector === BrokerVector.ClientListRequest || vector === BrokerVector.EndpointListRequest) {
-        if (buffer.length !== 8) throw new RangeError('Broker list request has invalid length');
-        return {vector, sequence};
-    }
-
-    if (vector === BrokerVector.ClientListReply) {
-        if (buffer.length < 11) throw new RangeError('Broker client list reply too short');
-        const statusCode = buffer.readUInt16BE(8);
-        if (!VALID_BROKER_STATUS_CODES.has(statusCode)) {
-            throw new RangeError(`Broker client list reply has invalid status code ${statusCode}`);
-        }
-        const count = buffer.readUInt8(10);
-        if (11 + count * 4 > buffer.length) throw new RangeError('Broker client list reply exceeds packet length');
-        if (11 + count * 4 !== buffer.length) throw new RangeError('Broker client list reply has trailing bytes');
-        const clients: number[] = [];
-        for (let i = 0; i < count; i++) {
-            clients.push(buffer.readUInt32BE(11 + i * 4));
-        }
-        return {
-            vector,
-            sequence,
-            statusCode: statusCode as BrokerStatusCode,
-            clients,
-        };
-    }
-
-    if (vector === BrokerVector.EndpointListReply) {
-        if (buffer.length < 11) throw new RangeError('Broker endpoint list reply too short');
-        const statusCode = buffer.readUInt16BE(8);
-        if (!VALID_BROKER_STATUS_CODES.has(statusCode)) {
-            throw new RangeError(`Broker endpoint list reply has invalid status code ${statusCode}`);
-        }
-        const count = buffer.readUInt8(10);
-        if (11 + count * 2 > buffer.length) throw new RangeError('Broker endpoint list reply exceeds packet length');
-        if (11 + count * 2 !== buffer.length) throw new RangeError('Broker endpoint list reply has trailing bytes');
-        const endpoints: number[] = [];
-        for (let i = 0; i < count; i++) {
-            endpoints.push(buffer.readUInt16BE(11 + i * 2));
-        }
-        return {
-            vector,
-            sequence,
-            statusCode: statusCode as BrokerStatusCode,
-            endpoints,
-        };
-    }
-
-    if (vector === BrokerVector.Disconnect) {
-        if (buffer.length < 12) throw new RangeError('Broker disconnect too short');
-        const reason = buffer.readUInt16BE(8);
-        if (!VALID_BROKER_DISCONNECT_REASONS.has(reason)) {
-            throw new RangeError(`Broker disconnect has invalid reason ${reason}`);
-        }
-        const textLength = buffer.readUInt16BE(10);
-        if (12 + textLength > buffer.length) throw new RangeError('Broker disconnect text exceeds packet length');
-        if (12 + textLength !== buffer.length) throw new RangeError('Broker disconnect has trailing bytes');
-        return {
-            vector,
-            sequence,
-            reason: reason as BrokerDisconnectReason,
-            text: readTextBlock(buffer, 10),
-        };
-    }
-
-    throw new Error(`Unsupported broker vector 0x${vector.toString(16)}`);
 };

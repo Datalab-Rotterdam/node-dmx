@@ -27,6 +27,18 @@ export class Fixture {
         if (address < 1 || address > 512) {
             throw new RangeError(`Address must be 1-512, got ${address}`);
         }
+        const personality = plugin.personalities.find((p) => p.id === personalityId);
+        if (!personality) {
+            throw new RangeError(
+                `Unknown personality id "${personalityId}" for ${plugin.vendor} ${plugin.model}`,
+            );
+        }
+        if (address - 1 + personality.channels > 512) {
+            throw new RangeError(
+                `Fixture at address ${address} with personality "${personalityId}" ` +
+                    `(${personality.channels} channels) exceeds universe bounds (512)`,
+            );
+        }
     }
 
     /**

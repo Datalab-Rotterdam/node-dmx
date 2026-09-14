@@ -122,7 +122,7 @@ describe('parseArtPollReply', () => {
         reply[11] = 168;
         reply[12] = 1;
         reply[13] = 99;
-        reply.writeUInt16BE(0x1936, 14);
+        reply.writeUInt16LE(0x1936, 14);
         reply[18] = 2;
         reply[19] = 3;
         reply[23] = 4;
@@ -134,8 +134,8 @@ describe('parseArtPollReply', () => {
         reply[187] = 2;
         reply[190] = 10;
         reply[191] = 11;
-        reply[201] = 6;
-        reply[211] = 7;
+        reply[212] = 6;
+        reply[217] = 7;
 
         expect(parseArtPollReply(reply)).toEqual({
             ip: '192.168.1.99',

@@ -66,18 +66,17 @@ const writeHeader = (buffer: Buffer, opcode: OpCode): void => {
 export const buildArtTodRequest = (options: ArtTodRequestOptions): Buffer => {
     const address = splitUniverseAddress(options.universe);
     const portAddresses = options.portAddresses ?? [address.subUni];
-    const buffer = Buffer.alloc(19 + portAddresses.length);
+    // Filler1(12), Filler2(13), Spare1-7(14-20), Net(21), Command(22), AddCount(23), Address[](24+).
+    const buffer = Buffer.alloc(24 + portAddresses.length);
     writeHeader(buffer, OpCode.OpTodRequest);
-    buffer.writeUInt8(0, 12);
-    buffer.writeUInt8(0, 13);
-    buffer.writeUInt8(0, 14);
-    buffer.writeUInt8(0, 15);
-    buffer.writeUInt8(address.net, 16);
-    buffer.writeUInt8(options.command ?? 0x00, 17);
-    buffer.writeUInt8(address.subUni, 18);
-    buffer.writeUInt8(portAddresses.length, 19);
+    buffer.writeUInt8(0, 12); // Filler1
+    buffer.writeUInt8(0, 13); // Filler2
+    for (let i = 14; i <= 20; i++) buffer.writeUInt8(0, i); // Spare1-7
+    buffer.writeUInt8(address.net, 21);
+    buffer.writeUInt8(options.command ?? 0x00, 22);
+    buffer.writeUInt8(portAddresses.length, 23);
     for (let i = 0; i < portAddresses.length; i++) {
-        buffer.writeUInt8(portAddresses[i] ?? 0, 20 + i);
+        buffer.writeUInt8(portAddresses[i] ?? 0, 24 + i);
     }
     return buffer;
 };
@@ -85,15 +84,15 @@ export const buildArtTodRequest = (options: ArtTodRequestOptions): Buffer => {
 /** Build OpTodControl packet. */
 export const buildArtTodControl = (options: ArtTodControlOptions): Buffer => {
     const address = splitUniverseAddress(options.universe);
-    const buffer = Buffer.alloc(19);
+    // Filler1(12), Filler2(13), Spare1-7(14-20), Net(21), Command(22), Address(23).
+    const buffer = Buffer.alloc(24);
     writeHeader(buffer, OpCode.OpTodControl);
-    buffer.writeUInt8(0, 12);
-    buffer.writeUInt8(0, 13);
-    buffer.writeUInt8(0, 14);
-    buffer.writeUInt8(0, 15);
-    buffer.writeUInt8(address.net, 16);
-    buffer.writeUInt8(options.command ?? 0x00, 17);
-    buffer.writeUInt8(address.subUni, 18);
+    buffer.writeUInt8(0, 12); // Filler1
+    buffer.writeUInt8(0, 13); // Filler2
+    for (let i = 14; i <= 20; i++) buffer.writeUInt8(0, i); // Spare1-7
+    buffer.writeUInt8(address.net, 21);
+    buffer.writeUInt8(options.command ?? 0x00, 22);
+    buffer.writeUInt8(address.subUni, 23);
     return buffer;
 };
 
@@ -101,7 +100,9 @@ export const buildArtTodControl = (options: ArtTodControlOptions): Buffer => {
 export const buildArtRdm = (options: ArtRdmPacket): Buffer => {
     const address = splitUniverseAddress(options.universe);
     const rdmPacket = options.rdmPacket;
-    const buffer = Buffer.alloc(26 + rdmPacket.length);
+    // RdmVer(12), Filler2(13), Spare1-5(14-18), FifoAvail(19,Int8), FifoMax(20,Int8),
+    // Net(21), Command(22), Address(23), RdmPacket(24+).
+    const buffer = Buffer.alloc(24 + rdmPacket.length);
     writeHeader(buffer, OpCode.OpRdm);
     buffer.writeUInt8(1, 12); // RdmVer
     buffer.writeUInt8(0, 13); // Filler2
@@ -110,12 +111,12 @@ export const buildArtRdm = (options: ArtRdmPacket): Buffer => {
     buffer.writeUInt8(0, 16); // Spare3
     buffer.writeUInt8(0, 17); // Spare4
     buffer.writeUInt8(0, 18); // Spare5
-    buffer.writeUInt16BE(0, 19); // FifoAvail
-    buffer.writeUInt16BE(0, 21); // FifoMax
-    buffer.writeUInt8(address.net, 23);
-    buffer.writeUInt8(options.command ?? 0x00, 24);
-    buffer.writeUInt8(address.subUni, 25);
-    rdmPacket.copy(buffer, 26);
+    buffer.writeUInt8(0, 19); // FifoAvail
+    buffer.writeUInt8(0, 20); // FifoMax
+    buffer.writeUInt8(address.net, 21);
+    buffer.writeUInt8(options.command ?? 0x00, 22);
+    buffer.writeUInt8(address.subUni, 23);
+    rdmPacket.copy(buffer, 24);
     return buffer;
 };
 
@@ -124,18 +125,20 @@ export const buildArtRdm = (options: ArtRdmPacket): Buffer => {
  * @returns Parsed data or `null` when payload is not OpTodData.
  */
 export const parseArtTodData = (buffer: Buffer): ArtTodData | null => {
-    if (buffer.length < 24) return null;
+    if (buffer.length < 28) return null;
     const id = buffer.toString('ascii', 0, 8);
     if (id !== ARTNET_ID) return null;
     const opcode = buffer.readUInt16LE(8);
     if (opcode !== OpCode.OpTodData) return null;
-    const net = buffer.readUInt8(20);
-    const address = buffer.readUInt8(22);
-    const uidTotal = buffer.readUInt16BE(23);
-    const blockCount = buffer.readUInt8(25);
-    const uidCount = buffer.readUInt8(26);
+    // RdmVer(12), Port(13), Spare1-6(14-19), BindIndex(20), Net(21),
+    // CommandResponse(22), Address(23), UidTotal(24-25), BlockCount(26), UidCount(27), ToD[](28+).
+    const net = buffer.readUInt8(21);
+    const address = buffer.readUInt8(23);
+    const uidTotal = buffer.readUInt16BE(24);
+    const blockCount = buffer.readUInt8(26);
+    const uidCount = buffer.readUInt8(27);
     const uids: UID[] = [];
-    let offset = 27;
+    let offset = 28;
     for (let i = 0; i < uidCount; i++) {
         if (offset + 6 > buffer.length) break;
         uids.push(uidFromBuffer(buffer, offset));

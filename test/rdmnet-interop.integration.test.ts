@@ -1,6 +1,6 @@
 import {describe, expect, it} from 'vitest';
 
-import {BrokerClientRole, BrokerSessionState, RdmnetClient} from '../src';
+import {BrokerSessionState, RdmnetClient} from '../src';
 
 const interopHost = process.env.RDMNET_INTEROP_HOST;
 const hasInteropEnv = Boolean(interopHost);
@@ -11,7 +11,6 @@ describe('RDMnet interop (real broker/device)', () => {
         const useTls = process.env.RDMNET_INTEROP_TLS === '1' || process.env.RDMNET_INTEROP_TLS === 'true';
         const port = Number(process.env.RDMNET_INTEROP_PORT ?? (useTls ? 5569 : 5568));
         const scope = process.env.RDMNET_INTEROP_SCOPE ?? 'default';
-        const endpointId = Number(process.env.RDMNET_INTEROP_ENDPOINT_ID ?? 1);
         const timeoutMs = Number(process.env.RDMNET_INTEROP_TIMEOUT_MS ?? 5000);
 
         const client = new RdmnetClient({
@@ -19,29 +18,19 @@ describe('RDMnet interop (real broker/device)', () => {
             port,
             transport: useTls ? 'tls' : 'tcp',
             requireTlsAuthorization: process.env.RDMNET_INTEROP_TLS_STRICT !== '0',
+            uid: {manufacturerId: 0x7a70, deviceId: 0x00000001},
         });
 
         try {
             await client.connect();
-            await client.startBrokerSession({
-                scope,
-                endpointId,
-                endpointRole: BrokerClientRole.Controller,
-                autoBind: true,
-                strictNegotiation: false,
-                timeoutMs,
-            });
+            await client.startBrokerSession({scope, timeoutMs});
 
-            expect(client.getBrokerSessionState()).toBe(BrokerSessionState.Bound);
-            expect(client.getBrokerClientId()).not.toBeNull();
+            expect(client.getBrokerSessionState()).toBe(BrokerSessionState.Connected);
+            expect(client.getBrokerUid()).not.toBeNull();
 
             if (process.env.RDMNET_INTEROP_CHECK_LISTS === '1') {
-                const [clients, endpoints] = await Promise.all([
-                    client.requestBrokerClientList(timeoutMs),
-                    client.requestBrokerEndpointList(timeoutMs),
-                ]);
+                const clients = await client.requestClientList(timeoutMs);
                 expect(Array.isArray(clients)).toBe(true);
-                expect(Array.isArray(endpoints)).toBe(true);
             }
         } finally {
             client.disconnect();

@@ -1,6 +1,6 @@
 import {DMXController, Fixture, RGBWW5Fixture} from '../src';
 
-const controller = new DMXController({protocol: 'sacn', iface: '10.0.0.102', reuseAddr: true});
+const controller = new DMXController({protocol: 'sacn', iface: process.env.DMX_IFACE || '10.0.0.102', reuseAddr: true});
 controller.addUniverse(1);
 
 const fixture = new Fixture(

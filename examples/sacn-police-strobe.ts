@@ -1,6 +1,6 @@
 import {DMXController} from '../src';
 
-const controller = new DMXController({protocol: 'sacn', iface: '10.0.0.102', reuseAddr: true});
+const controller = new DMXController({protocol: 'sacn', iface: process.env.DMX_IFACE || '10.0.0.102', reuseAddr: true});
 const universes = [controller.addUniverse(1), controller.addUniverse(2), controller.addUniverse(3), controller.addUniverse(4)];
 
 let tick = 0;

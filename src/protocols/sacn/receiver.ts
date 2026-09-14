@@ -7,6 +7,15 @@ import { EventEmitter } from 'events';
 
 import { Packet } from './packet';
 import { multicastGroup } from './util';
+import { DISCOVERY_UNIVERSE, RootVector, ExtendedFrameVector } from './constants';
+import {
+    peekRootVector,
+    peekExtendedFrameVector,
+    parseSyncPacket,
+    parseUniverseDiscoveryPacket,
+    type ParsedSyncPacket,
+    type ParsedUniverseDiscoveryPacket,
+} from './extended';
 import {AssertionError} from "node:assert";
 
 /**
@@ -32,6 +41,12 @@ export interface ReceiverProps {
      * @default false
      */
     reuseAddr?: boolean;
+    /**
+     * Also join the well-known Universe Discovery multicast group (E1.31 §8)
+     * so `universeDiscovery` events fire for active sources.
+     * @default false
+     */
+    discovery?: boolean;
 }
 
 /**
@@ -51,6 +66,14 @@ export interface ReceiverEvents {
      */
     PacketOutOfOrder: [Error];
     /**
+     * A Synchronization Packet was received (E1.31 §6).
+     */
+    syncPacket: [ParsedSyncPacket];
+    /**
+     * A Universe Discovery Packet page was received (E1.31 §8).
+     */
+    universeDiscovery: [ParsedUniverseDiscoveryPacket];
+    /**
      * Low-level socket or system error.
      */
     error: [Error];
@@ -69,11 +92,14 @@ export class Receiver extends EventEmitter<ReceiverEvents> {
      * Create an sACN receiver and subscribe to initial universes.
      * @param props Receiver socket/universe options.
      */
+    private readonly discovery: boolean;
+
     constructor({
                     universes = [1],
                     port = 5568,
                     iface,
                     reuseAddr = false,
+                    discovery = false,
                 }: ReceiverProps = {}) {
         super();
 
@@ -86,12 +112,23 @@ export class Receiver extends EventEmitter<ReceiverEvents> {
 
         this.universes = [...universes]; // defensive copy
         this.iface = iface;
+        this.discovery = discovery;
         this.lastSequence = {};
 
         this.socket = createSocket({ type: 'udp4', reuseAddr });
 
         this.socket.on('message', (msg, rinfo) => {
             try {
+                if (peekRootVector(msg) === RootVector.EXTENDED) {
+                    const frameVector = peekExtendedFrameVector(msg);
+                    if (frameVector === ExtendedFrameVector.SYNCHRONIZATION) {
+                        this.emit('syncPacket', parseSyncPacket(msg));
+                    } else if (frameVector === ExtendedFrameVector.DISCOVERY) {
+                        this.emit('universeDiscovery', parseUniverseDiscoveryPacket(msg));
+                    }
+                    return;
+                }
+
                 const packet = new Packet(msg, rinfo.address);
 
                 // Ignore packets for universes we're not subscribed to
@@ -104,13 +141,16 @@ export class Receiver extends EventEmitter<ReceiverEvents> {
                 const currentSeq = packet.sequence;
 
                 if (lastSeq !== undefined) {
-                    // Handle sequence wrap: 255 → 0 is valid
-                    const diff = (currentSeq - lastSeq + 256) % 256;
-                    // Allow small jumps forward (normal), but not large jumps or backwards
-                    // >20 suggests packet loss, replay, or new source
-                    if (diff > 20 && diff !== 1) {
+                    // E1.31 §6.7: signed 8-bit delta. Discard only small backward
+                    // deltas (stale/reordered/duplicate); accept everything else,
+                    // including large forward jumps (loss bursts, source restart).
+                    let diff = currentSeq - lastSeq;
+                    if (diff > 127) diff -= 256;
+                    if (diff < -128) diff += 256;
+
+                    if (diff < 0 && diff >= -20) {
                         throw new Error(
-                            `Packet significantly out of order in universe ${packet.universe} ` +
+                            `Stale/reordered packet in universe ${packet.universe} ` +
                             `from ${packet.sourceName || 'unknown'} ` +
                             `(last: ${lastSeq}, now: ${currentSeq})`,
                         );
@@ -136,6 +176,13 @@ export class Receiver extends EventEmitter<ReceiverEvents> {
             for (const uni of this.universes) {
                 try {
                     this.socket.addMembership(multicastGroup(uni), this.iface);
+                } catch (err) {
+                    this.emit('error', err as Error);
+                }
+            }
+            if (this.discovery) {
+                try {
+                    this.socket.addMembership(multicastGroup(DISCOVERY_UNIVERSE), this.iface);
                 } catch (err) {
                     this.emit('error', err as Error);
                 }

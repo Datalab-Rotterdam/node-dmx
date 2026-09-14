@@ -4,8 +4,10 @@
  */
 import {type Socket, createSocket} from 'dgram';
 import {EventEmitter} from 'events';
-import {multicastGroup} from './util';
+import {multicastGroup, randomCid} from './util';
 import {type Options, Packet} from './packet';
+import {FrameOptions} from './constants';
+import {buildSyncPacket} from './extended';
 
 export type SenderConfiguration = {
     /** Universe id (1-63999). */
@@ -43,6 +45,7 @@ export class Sender extends EventEmitter<SenderEvents> {
     public readonly refreshRate: number;
 
     private sequence = 0;
+    private syncSequence = 0;
     public resendStatus = false;
     private loopId: NodeJS.Timeout | undefined;
 
@@ -72,7 +75,12 @@ export class Sender extends EventEmitter<SenderEvents> {
         this.universe = universe;
         this.port = port;
         this.destinationIp = useUnicastDestination || multicastGroup(universe);
-        this.defaultPacketOptions = defaultPacketOptions;
+        // E1.31 §6.2.2: CID must uniquely identify this component for its
+        // lifetime. Generate one unless the caller supplied their own.
+        this.defaultPacketOptions = {
+            cid: randomCid(),
+            ...defaultPacketOptions,
+        };
         this.refreshRate = refreshRate;
 
         this.socket = createSocket({ type: 'udp4', reuseAddr });
@@ -137,6 +145,19 @@ export class Sender extends EventEmitter<SenderEvents> {
         await this.sendBuffer(buffer);
     }
 
+    /**
+     * Send a Synchronization Packet (E1.31 §6) for `syncAddress` (defaults
+     * to this sender's own universe). Receivers that were told to wait for
+     * sync (via a data packet's `syncUniverse` field) apply their buffered
+     * frame when this arrives.
+     */
+    public async sendSync(syncAddress: number = this.universe): Promise<void> {
+        const cid = this.defaultPacketOptions.cid ?? randomCid();
+        const buffer = buildSyncPacket({cid, sequence: this.syncSequence, syncAddress});
+        this.syncSequence = (this.syncSequence + 1) % 256;
+        await this.sendBuffer(buffer, multicastGroup(syncAddress));
+    }
+
     private async reSend(): Promise<void> {
         if (!this.latestPacketOptions) return;
 
@@ -149,9 +170,9 @@ export class Sender extends EventEmitter<SenderEvents> {
         }
     }
 
-    private sendBuffer(buffer: Buffer): Promise<void> {
+    private sendBuffer(buffer: Buffer, destinationIp: string = this.destinationIp): Promise<void> {
         return new Promise((resolve, reject) => {
-            this.socket.send(buffer, this.port, this.destinationIp, (err) => {
+            this.socket.send(buffer, this.port, destinationIp, (err) => {
                 if (err) reject(err);
                 else resolve();
             });
@@ -170,7 +191,29 @@ export class Sender extends EventEmitter<SenderEvents> {
             clearInterval(this.loopId);
             this.loopId = undefined;
         }
-        this.socket.close();
+        void this.terminateAndClose();
         return this;
+    }
+
+    /**
+     * E1.31 §6.2.6: a source should send at least 3 packets with
+     * Stream_Terminated set before it stops, so receivers drop the
+     * universe immediately instead of waiting out the source-loss timeout.
+     */
+    private async terminateAndClose(): Promise<void> {
+        try {
+            if (this.latestPacketOptions) {
+                for (let i = 0; i < 3; i++) {
+                    await this.send({
+                        ...this.latestPacketOptions,
+                        options: FrameOptions.STREAM_TERMINATED,
+                    });
+                }
+            }
+        } catch {
+            // Best-effort termination; still close the socket below.
+        } finally {
+            this.socket.close();
+        }
     }
 }

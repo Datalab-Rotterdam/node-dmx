@@ -6,25 +6,26 @@ It supports:
 - sACN (E1.31)
 - Art-Net 4
 - RDM over Art-Net
-- RDMnet (ANSI E1.33 transport + broker/session + RPT/EPT/LLRP + endpoint capability registry)
+- RDMnet (ANSI E1.33: root layer + Broker session + RPT RDM transactions + real LLRP UDP discovery)
 - A fixture plugin system
 
 ## RDMnet Compliance Status
-- Current state: production-grade implementation in progress toward full E1.33 interoperability.
-- Implemented: strict packet/message decoding, broker/session flows, RPT/EPT/LLRP helpers, TLS transport options, and interop test harnesses.
-- Not yet claimed: formal/full E1.33 compliance certification.
-- Required for a full compliance claim: successful third-party broker/device conformance runs in your target environment.
+- Root layer (`rdmnet/packet`), Broker PDU (`rdmnet/broker`), and RPT PDU (`rdmnet/rpt`) are wire-format-correct per ANSI E1.33, verified byte-for-byte against ETCLabs' open-source E1.33 reference implementation (root-layer extended flags+length, Broker Connect/Connect Reply/Client Entry/Client List/Disconnect/Null, RPT header + Request/Notification/Status PDUs including the RDM Command PDU's leading-0xCC encoding).
+- LLRP (`rdmnet/llrp-transport`: `LlrpManager`, `LlrpTarget`) implements the real ANSI E1.33 §6 UDP multicast transport — two multicast groups (request/response), the 27-byte LLRP PDU header, Probe Request/Reply, RDM command passthrough, and the reference discovery algorithm (ranged probing with a known-UID exclusion list, gated by consecutive clean rounds). It is intentionally not carried over `RdmnetClient`'s TCP connection, matching the spec's requirement that LLRP work without a live Broker session.
+- Not implemented: EPT client entries/messages beyond basic pass-through, Dynamic UID assignment, and Redirect V6. These are lower-traffic corners of E1.33 that most controllers/devices don't exercise.
+- Not claimed: formal/full E1.33 compliance certification — that requires running the ANSI/ESTA conformance test suite against real third-party brokers/controllers/devices in your target environment, which is outside what a library alone can certify.
 
 ## Feature Support Matrix
-| Area | Feature | sACN (E1.31) | Art-Net 4 | RDMnet (E1.33) | Notes |
-|---|---|---|---|---|---|
-| Core I/O | DMX Send | ✅ | ✅ | ❌ | `DMXController` sends DMX via sACN/Art-Net |
-| Core I/O | DMX Receive / Listen | ✅ | ✅ | ✅ | `Receiver`, `ArtNetReceiver`, `RdmnetClient` |
-| Device Discovery | Controller/Node Discovery | ❌ | ✅ | ⚠️ Partial | `ArtNetDiscovery`, `RdmnetDiscovery` (DNS-SD + mDNS) |
-| Device Management | RDM Messaging | ❌ | ✅ | ⚠️ Partial | `ArtNetRdmClient` full flow, `RdmnetClient` supports broker session + RPT `rdmTransaction` |
-| Security | Secure Transport | ❌ | ❌ | ✅ | `RdmnetClient` supports `transport: 'tls'`, peer auth policy, post-connect auth hook |
-| Ecosystem | Fixture Plugin System | ✅ | ✅ | ❌ | Fixture API currently targets DMX output protocols |
-| Compliance | Formal Protocol Compliance Claim | ✅ E1.31 implementation | ✅ Art-Net implementation | ⚠️ In progress | RDMnet full claim depends on third-party interop/conformance runs |
+| Area              | Feature                          | sACN (E1.31)            | Art-Net 4                 | RDMnet (E1.33)          | Notes                                                                                          |
+|-------------------|----------------------------------|--------------------------|---------------------------|--------------------------|-------------------------------------------------------------------------------------------------|
+| Core I/O          | DMX Send                         | ✅                      | ✅                        | ❌                      | `DMXController` sends DMX via sACN/Art-Net                                                      |
+| Core I/O          | DMX Receive / Listen             | ✅                      | ✅                        | ❌                      | `Receiver`, `ArtNetReceiver` — RDMnet carries RDM device management, not DMX slot data          |
+| Core I/O          | Synchronization / Discovery      | ✅                      | ✅ (ArtSync)              | n/a                      | `Sender.sendSync`, `UniverseDiscoverySource` (E1.31 §6/§8)                                      |
+| Device Discovery  | Controller/Node Discovery        | ⚠️ Discovery packets    | ✅                        | ✅                       | `ArtNetDiscovery`, `RdmnetDiscovery` (DNS-SD + mDNS), `LlrpManager`                              |
+| Device Management | RDM Messaging                    | ❌                      | ✅                        | ✅                       | `ArtNetRdmClient` full flow, `RdmnetClient` RPT `rdmTransaction`, `LlrpManager` RDM passthrough  |
+| Security          | Secure Transport                 | ❌                      | ❌                        | ✅                       | `RdmnetClient` supports `transport: 'tls'`, peer auth policy, post-connect auth hook            |
+| Ecosystem         | Fixture Plugin System            | ✅                      | ✅                        | ❌                       | Fixture API currently targets DMX output protocols                                              |
+| Compliance        | Formal Protocol Compliance Claim | ✅ E1.31 implementation | ✅ Art-Net implementation | ⚠️ Wire-format verified | RDMnet: root/Broker/RPT/LLRP wire-verified; full claim depends on third-party conformance runs  |
 
 This guide is written for students and first-time users: start simple, then move to advanced features.
 
@@ -183,6 +184,11 @@ Run an example:
 npm run example/sacn-rainbow
 ```
 
+All `sacn-*` examples read `DMX_IFACE` to override the hardcoded interface IP:
+```bash
+DMX_IFACE=192.168.1.50 npm run example/sacn-rainbow
+```
+
 ## 8. Common Options
 Useful options for `DMXController`:
 - `protocol`: `'sacn' | 'artnet'`
@@ -192,6 +198,7 @@ Useful options for `DMXController`:
 - `artSync`: send ArtSync after flush (Art-Net)
 
 RDMnet client options:
+- `uid`: **required** — this component's RDM UID (`{manufacturerId, deviceId}`), carried in the Broker Client Entry and every RPT header
 - `transport`: `'tcp' | 'tls'` (default `tcp`)
 - `tls`: Node TLS options (CA, client cert/key, ciphers, min/max version, etc.)
 - `requireTlsAuthorization`: reject unauthorized TLS peers (default `true` when `transport: 'tls'`)
@@ -218,7 +225,7 @@ npm run test:interop:rdmnet
 Useful flags:
 - `RDMNET_INTEROP_TLS=1`: use TLS transport
 - `RDMNET_INTEROP_TLS_STRICT=0`: allow non-authorized TLS peer for lab setups
-- `RDMNET_INTEROP_CHECK_LISTS=1`: also validate client/endpoint list requests
+- `RDMNET_INTEROP_CHECK_LISTS=1`: also validate the broker client-list request
 - `RDMNET_INTEROP_TIMEOUT_MS=5000`: per-request timeout override
 
 ## 10. TypeDoc

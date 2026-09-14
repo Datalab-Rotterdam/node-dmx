@@ -137,8 +137,9 @@ export class DMXController {
     }
 
     private async flushEntry(entry: UniverseEntry, force: boolean): Promise<boolean> {
-        if (!force && !entry.universe.consumeDirty()) return false;
+        if (!force && !entry.universe.isDirty()) return false;
         await entry.sender.sendRaw(entry.universe.data, {useRawDmxValues: true});
+        entry.universe.consumeDirty();
         return true;
     }
 

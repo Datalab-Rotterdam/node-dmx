@@ -4,7 +4,7 @@ import {FixtureModelPlugin} from '../../types';
 function clamp8(value: number): number {
     if (value <= 0) return 0;
     if (value >= 1) return 255;
-    return (value * 255) & 0xff;
+    return Math.round(value * 255);
 }
 
 /**

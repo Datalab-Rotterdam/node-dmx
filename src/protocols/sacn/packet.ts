@@ -31,6 +31,8 @@ export interface Options {
     cid?: Buffer;
     /** If true, treat payload values as 0-255 raw DMX instead of 0-100%. */
     useRawDmxValues?: boolean;
+    /** Framing layer Options bitfield (see {@link FrameOptions}). */
+    options?: number;
 }
 
 /**
@@ -142,6 +144,10 @@ export class Packet {
         this.frameFl = 0x7258;
         this.dmpFl = 0x720b;
 
+        if (!Number.isInteger(options.universe) || options.universe < 1 || options.universe > 63999) {
+            throw new RangeError(`Universe must be 1-63999, got ${options.universe}`);
+        }
+
         if (Buffer.isBuffer(options.payload) || options.payload instanceof Uint8Array) {
             this.payloadInput = Buffer.from(options.payload);
             this.useRawDmxValues = options.useRawDmxValues ?? true;
@@ -150,9 +156,14 @@ export class Packet {
             this.useRawDmxValues = options.useRawDmxValues ?? false;
         }
         this.sourceName = options.sourceName || 'sACN nodejs';
-        this.priority = options.priority ?? 100;
+        const priority = options.priority ?? 100;
+        if (priority < 0 || priority > 200) {
+            throw new RangeError(`Priority must be 0-200, got ${priority}`);
+        }
+        this.priority = priority;
         this.sequence = options.sequence;
         this.universe = options.universe;
+        this.options = options.options ?? 0;
         this.cid = options.cid ? Buffer.from(options.cid) : DEFAULT_CID; // ensure copy
     }
 

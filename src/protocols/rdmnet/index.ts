@@ -7,6 +7,7 @@ export * from './packet';
 export * from './errors';
 export * from './broker';
 export * from './ept-llrp';
+export * from './llrp-transport';
 export * from './discovery';
 export * from './rpt';
 export * from './client';

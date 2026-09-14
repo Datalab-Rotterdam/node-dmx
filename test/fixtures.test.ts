@@ -110,8 +110,8 @@ describe('RGBDimmerFixture', () => {
         });
 
         expect(frame[4]).toBe(255);
-        expect(frame[5]).toBe(127);
-        expect(frame[6]).toBe(63);
+        expect(frame[5]).toBe(128);
+        expect(frame[6]).toBe(64);
         expect(frame[7]).toBe(0);
     });
 
@@ -144,8 +144,8 @@ describe('RGBWW5Fixture', () => {
         });
 
         expect(frame[3]).toBe(255);
-        expect(frame[4]).toBe(127);
-        expect(frame[5]).toBe(63);
+        expect(frame[4]).toBe(128);
+        expect(frame[5]).toBe(64);
         expect(frame[6]).toBe(191);
         expect(frame[7]).toBe(0);
     });
@@ -159,11 +159,11 @@ describe('RGBWW5Fixture', () => {
             ctx: {base: 0, frame},
         });
 
-        expect(frame[0]).toBe(25);
+        expect(frame[0]).toBe(26);
         expect(frame[1]).toBe(51);
-        expect(frame[2]).toBe(76);
-        expect(frame[3]).toBe(127);
-        expect(frame[4]).toBe(63);
+        expect(frame[2]).toBe(77);
+        expect(frame[3]).toBe(128);
+        expect(frame[4]).toBe(64);
     });
 
     it('ignores unknown personality id', () => {

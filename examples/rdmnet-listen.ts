@@ -27,6 +27,7 @@ const options = parseArgs(process.argv.slice(2));
 const client = new RdmnetClient({
     host: options.host,
     port: options.port,
+    uid: {manufacturerId: 0x7a70, deviceId: 0x00000001},
 });
 
 client.on('connect', () => {
@@ -41,11 +42,13 @@ client.on('message', (packet) => {
 
 client.on('rptMessage', (message) => {
     if (message.vector === RptVector.Status) {
-        console.log(`RPT status seq=${message.sequence} code=${message.statusCode} text="${message.text ?? ''}"`);
-    } else if (message.vector === RptVector.RdmCommand) {
-        console.log(`RPT RDM command seq=${message.sequence} pid=0x${message.request.pid.toString(16)}`);
-    } else if (message.vector === RptVector.RdmResponse) {
-        console.log(`RPT RDM response seq=${message.sequence} pid=0x${message.response.pid.toString(16)}`);
+        console.log(`RPT status seq=${message.header.sequenceNumber} code=${message.statusCode} text="${message.text ?? ''}"`);
+    } else if (message.vector === RptVector.Request) {
+        console.log(`RPT request seq=${message.header.sequenceNumber} pid=0x${message.command.pid.toString(16)}`);
+    } else if (message.vector === RptVector.Notification) {
+        for (const response of message.commands) {
+            console.log(`RPT notification seq=${message.header.sequenceNumber} pid=0x${response.pid.toString(16)}`);
+        }
     }
 });
 
@@ -63,7 +66,7 @@ client.on('error', (error) => {
 
 async function main(): Promise<void> {
     await client.connect();
-    await client.startBrokerSession({scope: 'default', autoBind: false}).catch((err) => {
+    await client.startBrokerSession({scope: 'default'}).catch((err) => {
         console.error('[BrokerSessionError]', err.message);
     });
 
@@ -73,14 +76,10 @@ async function main(): Promise<void> {
             data: Buffer.alloc(0),
         });
         console.log(`Sent vector 0x${options.vector.toString(16)} message`);
+    } else if (client.getBrokerSessionState() === BrokerSessionState.Connected) {
+        console.log('Broker session active; listening for RPT/broker traffic');
     } else {
-        if (client.getBrokerSessionState() === BrokerSessionState.Connected
-            || client.getBrokerSessionState() === BrokerSessionState.Bound) {
-            await client.sendStatus(0, 'node-dmx RDMnet online');
-            console.log('Sent default RPT status message');
-        } else {
-            console.log('Broker session not active; skipping default status message');
-        }
+        console.log('Broker session not active; listening for raw packets only');
     }
 }
 

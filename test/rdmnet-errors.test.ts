@@ -1,19 +1,19 @@
 import {describe, expect, it} from 'vitest';
 
-import {BrokerStatusCode, mapBrokerStatusToError, RdmnetError} from '../src';
+import {ConnectionStatusCode, mapBrokerStatusToError, RdmnetError} from '../src';
 
 describe('RDMnet errors', () => {
     it('maps broker status codes to structured RdmnetError', () => {
         const err = mapBrokerStatusToError(
-            BrokerStatusCode.Unauthorized,
-            'auth failed',
+            ConnectionStatusCode.InvalidUid,
+            'invalid uid',
             {phase: 'connect'},
         );
         expect(err).toBeInstanceOf(RdmnetError);
         expect(err).toMatchObject({
             domain: 'broker',
-            code: 'BROKER_UNAUTHORIZED',
-            statusCode: BrokerStatusCode.Unauthorized,
+            code: 'BROKER_INVALID_UID',
+            statusCode: ConnectionStatusCode.InvalidUid,
         });
         expect(err.details).toEqual({phase: 'connect'});
     });

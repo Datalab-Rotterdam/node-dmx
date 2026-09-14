@@ -25,28 +25,40 @@ import {
     type RdmnetPacketOptions,
 } from './packet';
 import {
-    BrokerClientRole,
-    BrokerDisconnectReason,
     type BrokerMessage,
-    BrokerSessionState,
-    BrokerStatusCode,
     BrokerVector,
+    ClientProtocol,
+    ConnectionStatusCode,
+    DEFAULT_SCOPE,
+    DisconnectReason,
+    E133_VERSION,
     decodeBrokerMessage,
     encodeBrokerMessage,
+    RptClientType,
+    type RptClientEntry,
 } from './broker';
 import {mapBrokerStatusToError, RdmnetError} from './errors';
+import {decodeEptMessage, encodeEptMessage, type EptMessage} from './ept-llrp';
 import {
-    decodeEptMessage,
-    decodeLlrpMessage,
-    encodeEptMessage,
-    encodeLlrpMessage,
-    type EptMessage,
-    LlrpVector,
-    type LlrpProbeReplyMessage,
-    type LlrpMessage,
-} from './ept-llrp';
-import {decodeRptMessage, encodeRptMessage, RptVector, type RptMessage, type RptRdmResponseMessage} from './rpt';
+    decodeRptMessage,
+    encodeRptMessage,
+    RptStatusCode,
+    RptVector,
+    type RptHeader,
+    type RptMessage,
+    type RptNotificationMessage,
+} from './rpt';
 import type {RdmRequest, RdmResponse} from '../artnet/rdm/types';
+import {uidToString, type UID} from '../artnet/rdm/uid';
+
+/** Client-side connection/session lifecycle state (not a wire concept — local bookkeeping only). */
+export enum BrokerSessionState {
+    Disconnected = 'disconnected',
+    TcpConnected = 'tcp_connected',
+    Connecting = 'connecting',
+    Connected = 'connected',
+    Error = 'error',
+}
 
 /**
  * Configuration for a {@link RdmnetClient}.
@@ -82,18 +94,20 @@ export type RdmnetClientOptions = {
         authorized?: boolean;
         authorizationError?: Error | string | null;
     }) => Promise<void> | void;
+    /** This component's RDM UID — required, carried in every Broker Client Entry / RPT header. */
+    uid: UID;
     /** Optional fixed CID. Must be 16 bytes when provided. */
     cid?: Buffer;
+    /** RPT client type advertised at Connect. Defaults to `Controller`. */
+    clientType?: RptClientType;
     /** Enable reconnect behavior after unexpected disconnects. Default: `true`. */
     autoReconnect?: boolean;
     /** Initial reconnect backoff delay in milliseconds. */
     reconnectDelayMs?: number;
     /** Maximum reconnect backoff delay in milliseconds. */
     reconnectMaxDelayMs?: number;
-    /** Interval for keepalive heartbeats in milliseconds. */
+    /** Interval for keepalive heartbeats (Broker Null message) in milliseconds. */
     heartbeatIntervalMs?: number;
-    /** Root vector used for generic heartbeat packets while not broker-bound. */
-    heartbeatVector?: number;
     /** Default timeout for request/response operations. */
     requestTimeoutMs?: number;
     /** Maximum buffered stream bytes before framing-corruption protection triggers. */
@@ -104,20 +118,13 @@ export type RdmnetClientOptions = {
  * Broker session startup options used by {@link RdmnetClient.startBrokerSession}.
  */
 export type BrokerSessionOptions = {
-    /** Broker scope name. */
+    /** Broker scope name. Defaults to {@link DEFAULT_SCOPE}. */
     scope?: string;
-    /** Client role used during broker connect. */
-    role?: BrokerClientRole;
-    /** Local endpoint ID to bind. */
-    endpointId?: number;
-    /** Whether to issue a bind request after successful connect reply. */
-    autoBind?: boolean;
-    /** Endpoint role requested during bind. */
-    endpointRole?: BrokerClientRole;
-    /** Requested profile set for bind negotiation. */
-    profiles?: number[];
-    /** Validate negotiated role/profile against request. */
-    strictNegotiation?: boolean;
+    e133Version?: number;
+    /** E1.33 search domain (mDNS domain used for broker discovery). */
+    searchDomain?: string;
+    /** Request incremental (Add/Remove/Change) client-list updates instead of full re-sends. */
+    incrementalUpdates?: boolean;
     /** Per-session timeout override. */
     timeoutMs?: number;
 };
@@ -142,16 +149,14 @@ export interface RdmnetClientEvents {
     brokerMessage: [message: BrokerMessage];
     /** Emitted when broker session state changes. */
     brokerState: [state: BrokerSessionState];
-    /** Emitted when endpoint capability cache entries change. */
-    endpointCapabilitiesUpdated: [endpointId: number];
+    /** Emitted when the locally cached known-client list changes. */
+    clientListUpdated: [];
     /** Emitted for decoded EPT messages. */
     eptMessage: [message: EptMessage];
-    /** Emitted for decoded LLRP messages. */
-    llrpMessage: [message: LlrpMessage];
     /** Emitted for decoded RPT messages. */
     rptMessage: [message: RptMessage];
-    /** Emitted for decoded RPT RDM responses. */
-    rdmResponse: [message: RptRdmResponseMessage];
+    /** Emitted for decoded RPT Notification messages (RDM responses). */
+    rdmNotification: [message: RptNotificationMessage];
     /** Emitted for transport/protocol/timeout/decode errors. */
     error: [error: Error];
 }
@@ -167,32 +172,24 @@ type Waiter = {
     timeoutId: NodeJS.Timeout;
 };
 
-export type EndpointCapabilities = {
-    /** Endpoint identifier. */
-    endpointId: number;
-    /** Advertised or negotiated role. */
-    role: BrokerClientRole | null;
-    /** Normalized profile IDs. */
-    profiles: number[];
-    /** Source of the cached capability entry. */
-    source: 'local_advertisement' | 'remote_advertisement' | 'broker_negotiation';
-    /** Epoch milliseconds of last update. */
-    updatedAt: number;
-};
-
 /**
- * Production-ready RDMnet transport client foundation.
+ * ANSI E1.33 (RDMnet) Broker/RPT TCP client.
  *
- * Supports plain TCP and TLS, broker session management, strict message
- * decoding, and helper APIs for RPT/EPT/LLRP flows.
+ * Root layer framing, Broker PDU, and RPT PDU are all wire-compatible with
+ * third-party E1.33 brokers/controllers/devices (see `rdmnet/broker` and
+ * `rdmnet/rpt` for the verified byte layouts). LLRP is intentionally not
+ * exposed here — per ANSI E1.33 §6 it is an independent UDP multicast
+ * transport, not something carried over this TCP connection; see
+ * `LlrpManager`/`LlrpTarget` in `rdmnet/llrp-transport`.
  */
 export class RdmnetClient extends EventEmitter<RdmnetClientEvents> {
     private readonly cid: Buffer;
+    private readonly uid: UID;
+    private readonly clientType: RptClientType;
     private readonly autoReconnect: boolean;
     private readonly reconnectDelayMs: number;
     private readonly reconnectMaxDelayMs: number;
     private readonly heartbeatIntervalMs: number;
-    private readonly heartbeatVector: number;
     private readonly requestTimeoutMs: number;
     private readonly maxBufferBytes: number;
     private readonly transport: 'tcp' | 'tls';
@@ -208,16 +205,12 @@ export class RdmnetClient extends EventEmitter<RdmnetClientEvents> {
     private reconnectTimer: NodeJS.Timeout | null = null;
     private heartbeatTimer: NodeJS.Timeout | null = null;
     private waiters: Waiter[] = [];
-    private rdmnetSequence = 0;
+    private rptSequence = 0;
 
     private brokerState: BrokerSessionState = BrokerSessionState.Disconnected;
-    private brokerClientId: number | null = null;
-    private brokerEndpointId = 1;
-    private brokerScope = 'default';
-    private brokerRole: BrokerClientRole = BrokerClientRole.Controller;
-    private brokerNegotiatedRole: BrokerClientRole | null = null;
-    private brokerNegotiatedProfile: number | null = null;
-    private endpointCapabilities = new Map<number, EndpointCapabilities>();
+    private brokerUid: UID | null = null;
+    private brokerScope = DEFAULT_SCOPE;
+    private knownClients = new Map<string, RptClientEntry>();
 
     constructor(private readonly options: RdmnetClientOptions) {
         super();
@@ -225,12 +218,13 @@ export class RdmnetClient extends EventEmitter<RdmnetClientEvents> {
         if (this.cid.length !== 16) {
             throw new RangeError(`RDMnet CID must be 16 bytes, got ${this.cid.length}`);
         }
+        this.uid = options.uid;
+        this.clientType = options.clientType ?? RptClientType.Controller;
 
         this.autoReconnect = options.autoReconnect ?? true;
         this.reconnectDelayMs = options.reconnectDelayMs ?? RDMNET_DEFAULT_RECONNECT_DELAY_MS;
         this.reconnectMaxDelayMs = options.reconnectMaxDelayMs ?? RDMNET_DEFAULT_RECONNECT_MAX_DELAY_MS;
         this.heartbeatIntervalMs = options.heartbeatIntervalMs ?? RDMNET_DEFAULT_HEARTBEAT_MS;
-        this.heartbeatVector = options.heartbeatVector ?? RdmnetRootVector.Broker;
         this.requestTimeoutMs = options.requestTimeoutMs ?? RDMNET_DEFAULT_REQUEST_TIMEOUT_MS;
         this.maxBufferBytes = options.maxBufferBytes ?? RDMNET_DEFAULT_MAX_BUFFER_BYTES;
         this.transport = options.transport ?? 'tcp';
@@ -268,41 +262,32 @@ export class RdmnetClient extends EventEmitter<RdmnetClientEvents> {
         return Buffer.from(this.cid);
     }
 
-    /** Returns current broker state machine value. */
+    /** Returns this component's RDM UID. */
+    public getUid(): UID {
+        return this.uid;
+    }
+
+    /** Returns current broker session state. */
     public getBrokerSessionState(): BrokerSessionState {
         return this.brokerState;
     }
 
-    /** Returns assigned broker client ID or `null` when not connected to a broker session. */
-    public getBrokerClientId(): number | null {
-        return this.brokerClientId;
+    /** Returns the Broker's own UID once connected, else `null`. */
+    public getBrokerUid(): UID | null {
+        return this.brokerUid;
     }
 
-    /** Returns negotiated broker role after bind, if available. */
-    public getBrokerNegotiatedRole(): BrokerClientRole | null {
-        return this.brokerNegotiatedRole;
+    /** Returns a snapshot of the locally cached known-client list (seeded/updated by Broker list messages). */
+    public listKnownClients(): RptClientEntry[] {
+        return Array.from(this.knownClients.values());
     }
 
-    /** Returns negotiated broker profile after bind, if available. */
-    public getBrokerNegotiatedProfile(): number | null {
-        return this.brokerNegotiatedProfile;
+    /** Looks up one cached known client by UID. */
+    public getKnownClient(uid: UID): RptClientEntry | null {
+        return this.knownClients.get(uidToString(uid)) ?? null;
     }
 
-    /** Returns cached capabilities for one endpoint, if present. */
-    public getEndpointCapabilities(endpointId: number): EndpointCapabilities | null {
-        const entry = this.endpointCapabilities.get(endpointId);
-        return entry ? {...entry, profiles: [...entry.profiles]} : null;
-    }
-
-    /** Lists all cached endpoint capability entries. */
-    public listEndpointCapabilities(): EndpointCapabilities[] {
-        return Array.from(this.endpointCapabilities.values()).map((entry) => ({
-            ...entry,
-            profiles: [...entry.profiles],
-        }));
-    }
-
-    /** Gracefully closes the socket and resets session/cache state. */
+    /** Gracefully closes the socket and resets session state. */
     public disconnect(): void {
         this.manualClose = true;
         this.stopReconnectTimer();
@@ -311,10 +296,8 @@ export class RdmnetClient extends EventEmitter<RdmnetClientEvents> {
         this.socket?.end();
         this.socket = null;
         this.setBrokerState(BrokerSessionState.Disconnected);
-        this.brokerClientId = null;
-        this.brokerNegotiatedRole = null;
-        this.brokerNegotiatedProfile = null;
-        this.endpointCapabilities.clear();
+        this.brokerUid = null;
+        this.knownClients.clear();
     }
 
     /** Sends one ACN root packet. */
@@ -389,66 +372,6 @@ export class RdmnetClient extends EventEmitter<RdmnetClientEvents> {
         }, timeoutMs).then((packet) => decodeEptMessage(packet.data) as T);
     }
 
-    /** Waits for a decoded LLRP message matching a type guard. */
-    public waitForLlrpMessage<T extends LlrpMessage>(
-        matcher: (message: LlrpMessage) => message is T,
-        timeoutMs = this.requestTimeoutMs,
-    ): Promise<T> {
-        return this.waitForMessage((packet) => {
-            if (packet.vector !== RdmnetRootVector.Llrp) return false;
-            try {
-                return matcher(decodeLlrpMessage(packet.data));
-            } catch {
-                return false;
-            }
-        }, timeoutMs).then((packet) => decodeLlrpMessage(packet.data) as T);
-    }
-
-    /**
-     * Sends an LLRP probe request and returns the generated sequence ID.
-     */
-    public async sendLlrpProbeRequest(lowerUid: Buffer, upperUid: Buffer): Promise<number> {
-        const sequence = this.nextRdmnetSequence();
-        await this.sendLlrpMessage({
-            vector: LlrpVector.ProbeRequest,
-            sequence,
-            lowerUid,
-            upperUid,
-        });
-        return sequence;
-    }
-
-    /**
-     * Sends one LLRP probe request and collects unique probe replies for `timeoutMs`.
-     */
-    public async discoverLlrpTargets(
-        lowerUid: Buffer,
-        upperUid: Buffer,
-        timeoutMs = this.requestTimeoutMs,
-    ): Promise<LlrpProbeReplyMessage[]> {
-        if (lowerUid.length !== 6 || upperUid.length !== 6) {
-            throw new RangeError('LLRP UID bounds must be 6-byte buffers');
-        }
-        const found = new Map<string, LlrpProbeReplyMessage>();
-        const onMessage = (message: LlrpMessage): void => {
-            if (message.vector !== LlrpVector.ProbeReply) return;
-            if (message.sequence !== sequence) return;
-            found.set(message.targetUid.toString('hex'), message);
-        };
-
-        const sequence = this.nextRdmnetSequence();
-        this.on('llrpMessage', onMessage);
-        await this.sendLlrpMessage({
-            vector: LlrpVector.ProbeRequest,
-            sequence,
-            lowerUid,
-            upperUid,
-        });
-        await new Promise((resolve) => setTimeout(resolve, timeoutMs));
-        this.off('llrpMessage', onMessage);
-        return Array.from(found.values());
-    }
-
     /** Sends raw bytes to the connected transport socket. */
     public async sendRaw(data: Buffer | Uint8Array): Promise<void> {
         if (!this.socket) {
@@ -479,180 +402,73 @@ export class RdmnetClient extends EventEmitter<RdmnetClientEvents> {
         });
     }
 
-    /** Encodes and sends one LLRP payload. */
-    public async sendLlrpMessage(message: LlrpMessage): Promise<void> {
-        await this.sendPacket({
-            vector: RdmnetRootVector.Llrp,
-            data: encodeLlrpMessage(message),
-        });
-    }
-
     /**
-     * Runs broker connect + optional bind flow and updates broker negotiation state.
+     * Sends the Broker Connect message (with this client's RPT Client Entry)
+     * and waits for Connect Reply.
      */
     public async startBrokerSession(options: BrokerSessionOptions = {}): Promise<void> {
         await this.connect();
-        if (this.brokerState === BrokerSessionState.Bound) return;
+        if (this.brokerState === BrokerSessionState.Connected) return;
         if (this.brokerState !== BrokerSessionState.TcpConnected && this.brokerState !== BrokerSessionState.Error) {
             throw new Error(`Cannot start broker session from state "${this.brokerState}"`);
         }
 
         const scope = options.scope ?? this.brokerScope;
-        const role = options.role ?? this.brokerRole;
-        const endpointId = options.endpointId ?? this.brokerEndpointId;
-        const autoBind = options.autoBind ?? true;
-        const endpointRole = options.endpointRole ?? role;
-        const profiles = options.profiles ?? [];
-        const strictNegotiation = options.strictNegotiation ?? true;
         const timeoutMs = options.timeoutMs ?? this.requestTimeoutMs;
-
         this.brokerScope = scope;
-        this.brokerRole = role;
-        this.brokerEndpointId = endpointId;
 
-        const connectSeq = this.nextRdmnetSequence();
         this.setBrokerState(BrokerSessionState.Connecting);
         const connectReplyPromise = this.waitForBrokerMessage(
             (message): message is Extract<BrokerMessage, {vector: BrokerVector.ConnectReply}> =>
-                message.vector === BrokerVector.ConnectReply && message.sequence === connectSeq,
+                message.vector === BrokerVector.ConnectReply,
             timeoutMs,
         );
         await this.sendBrokerMessage({
-            vector: BrokerVector.ConnectRequest,
-            sequence: connectSeq,
-            role,
+            vector: BrokerVector.Connect,
             scope,
+            e133Version: options.e133Version ?? E133_VERSION,
+            searchDomain: options.searchDomain,
+            incrementalUpdates: options.incrementalUpdates,
+            clientEntry: {
+                clientProtocol: ClientProtocol.Rpt,
+                cid: this.cid,
+                uid: this.uid,
+                clientType: this.clientType,
+                bindingCid: Buffer.alloc(16),
+            },
         });
-        const connectReply = await connectReplyPromise;
+        const reply = await connectReplyPromise;
 
-        if (connectReply.statusCode !== BrokerStatusCode.Ok) {
+        if (reply.connectionStatus !== ConnectionStatusCode.Ok) {
             this.setBrokerState(BrokerSessionState.Error);
-            throw mapBrokerStatusToError(
-                connectReply.statusCode,
-                connectReply.text || 'Broker connect rejected',
-                {phase: 'connect', scope},
-            );
+            throw mapBrokerStatusToError(reply.connectionStatus, 'Broker connect rejected', {scope});
         }
 
-        this.brokerClientId = connectReply.clientId;
+        this.brokerUid = reply.brokerUid;
         this.setBrokerState(BrokerSessionState.Connected);
-        if (!autoBind) return;
-
-        const bindSeq = this.nextRdmnetSequence();
-        this.setBrokerState(BrokerSessionState.Binding);
-        const bindReplyPromise = this.waitForBrokerMessage(
-            (message): message is Extract<BrokerMessage, {vector: BrokerVector.ClientBindReply}> =>
-                message.vector === BrokerVector.ClientBindReply
-                && message.sequence === bindSeq
-                && message.endpointId === endpointId,
-            timeoutMs,
-        );
-        await this.sendBrokerMessage({
-            vector: BrokerVector.ClientBindRequest,
-            sequence: bindSeq,
-            endpointId,
-            requestedRole: endpointRole,
-            profiles,
-        });
-        const bindReply = await bindReplyPromise;
-
-        if (bindReply.statusCode !== BrokerStatusCode.Ok) {
-            this.setBrokerState(BrokerSessionState.Error);
-            throw mapBrokerStatusToError(
-                bindReply.statusCode,
-                bindReply.text || 'Broker bind rejected',
-                {phase: 'bind', endpointId},
-            );
-        }
-
-        if (strictNegotiation) {
-            const negotiatedRole = bindReply.negotiatedRole ?? endpointRole;
-            if (negotiatedRole !== endpointRole) {
-                this.setBrokerState(BrokerSessionState.Error);
-                throw new RdmnetError({
-                    message: `Broker negotiated role ${negotiatedRole} but endpoint requested role ${endpointRole}`,
-                    domain: 'negotiation',
-                    code: 'NEGOTIATION_ROLE_MISMATCH',
-                    details: {requestedRole: endpointRole, negotiatedRole},
-                });
-            }
-            if (profiles.length > 0) {
-                const negotiatedProfile = bindReply.negotiatedProfile;
-                if (negotiatedProfile === undefined || negotiatedProfile === null || !profiles.includes(negotiatedProfile)) {
-                    this.setBrokerState(BrokerSessionState.Error);
-                    throw new RdmnetError({
-                        message: `Broker negotiated profile ${negotiatedProfile ?? 'none'} not in requested profiles [${profiles.join(', ')}]`,
-                        domain: 'negotiation',
-                        code: 'NEGOTIATION_PROFILE_MISMATCH',
-                        details: {requestedProfiles: profiles, negotiatedProfile},
-                    });
-                }
-            }
-        }
-
-        this.brokerNegotiatedRole = bindReply.negotiatedRole ?? endpointRole;
-        this.brokerNegotiatedProfile = bindReply.negotiatedProfile ?? null;
-        this.updateEndpointCapabilities(
-            endpointId,
-            this.brokerNegotiatedRole,
-            this.brokerNegotiatedProfile === null ? profiles : [this.brokerNegotiatedProfile],
-            'broker_negotiation',
-        );
-        this.setBrokerState(BrokerSessionState.Bound);
     }
 
     /** Sends broker disconnect and resets broker-bound state. */
-    public async stopBrokerSession(reason = BrokerDisconnectReason.Graceful, text = ''): Promise<void> {
-        if (!this.isConnected()) return;
-        await this.sendBrokerMessage({
-            vector: BrokerVector.Disconnect,
-            sequence: this.nextRdmnetSequence(),
-            reason,
-            text,
-        });
+    public async stopBrokerSession(reason = DisconnectReason.Shutdown): Promise<void> {
+        if (!this.isConnected() || this.brokerState !== BrokerSessionState.Connected) return;
+        await this.sendBrokerMessage({vector: BrokerVector.Disconnect, reason});
         this.setBrokerState(BrokerSessionState.TcpConnected);
-        this.brokerClientId = null;
-        this.brokerNegotiatedRole = null;
-        this.brokerNegotiatedProfile = null;
-        this.endpointCapabilities.clear();
+        this.brokerUid = null;
+        this.knownClients.clear();
     }
 
-    /** Requests broker client list and returns client IDs on success. */
-    public async requestBrokerClientList(timeoutMs = this.requestTimeoutMs): Promise<number[]> {
-        const sequence = this.nextRdmnetSequence();
-        const responsePromise = this.waitForBrokerMessage(
-            (message): message is Extract<BrokerMessage, {vector: BrokerVector.ClientListReply}> =>
-                message.vector === BrokerVector.ClientListReply && message.sequence === sequence,
+    /** Requests the Broker's connected-client list and updates the local cache. */
+    public async requestClientList(timeoutMs = this.requestTimeoutMs): Promise<RptClientEntry[]> {
+        const replyPromise = this.waitForBrokerMessage(
+            (message): message is Extract<BrokerMessage, {vector: BrokerVector.ConnectedClientList}> =>
+                message.vector === BrokerVector.ConnectedClientList,
             timeoutMs,
         );
-        await this.sendBrokerMessage({
-            vector: BrokerVector.ClientListRequest,
-            sequence,
-        });
-        const reply = await responsePromise;
-        if (reply.statusCode !== BrokerStatusCode.Ok) {
-            throw mapBrokerStatusToError(reply.statusCode, 'Broker client list request failed');
-        }
-        return [...reply.clients];
-    }
-
-    /** Requests broker endpoint list and returns endpoint IDs on success. */
-    public async requestBrokerEndpointList(timeoutMs = this.requestTimeoutMs): Promise<number[]> {
-        const sequence = this.nextRdmnetSequence();
-        const responsePromise = this.waitForBrokerMessage(
-            (message): message is Extract<BrokerMessage, {vector: BrokerVector.EndpointListReply}> =>
-                message.vector === BrokerVector.EndpointListReply && message.sequence === sequence,
-            timeoutMs,
-        );
-        await this.sendBrokerMessage({
-            vector: BrokerVector.EndpointListRequest,
-            sequence,
-        });
-        const reply = await responsePromise;
-        if (reply.statusCode !== BrokerStatusCode.Ok) {
-            throw mapBrokerStatusToError(reply.statusCode, 'Broker endpoint list request failed');
-        }
-        return [...reply.endpoints];
+        await this.sendBrokerMessage({vector: BrokerVector.FetchClientList});
+        const reply = await replyPromise;
+        // The generic inbound-packet handler already applied this ConnectedClientList
+        // to the cache (see handleBrokerMessage) before this waiter resolved.
+        return reply.clients;
     }
 
     /** Encodes and sends one RPT payload. */
@@ -663,109 +479,92 @@ export class RdmnetClient extends EventEmitter<RdmnetClientEvents> {
         });
     }
 
-    /** Sends an RPT RDM command and returns the generated sequence ID. */
-    public async sendRdmCommand(request: RdmRequest, endpointId = 1): Promise<number> {
-        const sequence = this.nextRdmnetSequence();
-        await this.sendRptMessage({
-            vector: RptVector.RdmCommand,
-            sequence,
-            endpointId,
-            request,
-        });
-        return sequence;
+    /** Builds an RPT header addressed from this client to `destUid`/`destEndpointId`. */
+    public buildRptHeader(destUid: UID, destEndpointId = 0, sourceEndpointId = 0): RptHeader {
+        return {
+            sourceUid: this.uid,
+            sourceEndpointId,
+            destUid,
+            destEndpointId,
+            sequenceNumber: this.nextRptSequence(),
+        };
     }
 
     /**
-     * Sends an RPT RDM command and waits for the correlated RDM response.
+     * Sends an RPT RDM command (Request PDU) and returns the header used
+     * (its `sequenceNumber` correlates the eventual Notification/Status).
+     */
+    public async sendRdmRequest(destUid: UID, request: RdmRequest, destEndpointId = 0): Promise<RptHeader> {
+        const header = this.buildRptHeader(destUid, destEndpointId);
+        await this.sendRptMessage({vector: RptVector.Request, header, command: request});
+        return header;
+    }
+
+    /**
+     * Sends an RPT RDM command and waits for the correlated Notification
+     * (RDM response) or Status (error). Returns the first RDM response when
+     * the Notification batches more than one.
      */
     public async rdmTransaction(
+        destUid: UID,
         request: RdmRequest,
-        endpointId = 1,
-        timeoutMs = this.requestTimeoutMs,
+        options: {destEndpointId?: number; timeoutMs?: number} = {},
     ): Promise<RdmResponse> {
-        const sequence = this.nextRdmnetSequence();
+        const timeoutMs = options.timeoutMs ?? this.requestTimeoutMs;
+        const header = this.buildRptHeader(destUid, options.destEndpointId ?? 0);
         const responsePromise = this.waitForMessage((packet) => {
             if (packet.vector !== RdmnetRootVector.Rpt) return false;
             try {
                 const rpt = decodeRptMessage(packet.data);
-                return rpt.vector === RptVector.RdmResponse && rpt.sequence === sequence;
+                return (
+                    (rpt.vector === RptVector.Notification || rpt.vector === RptVector.Status)
+                    && rpt.header.sequenceNumber === header.sequenceNumber
+                );
             } catch {
                 return false;
             }
         }, timeoutMs).then((packet) => {
-            const rpt = decodeRptMessage(packet.data);
-            if (rpt.vector !== RptVector.RdmResponse) {
-                throw new Error('Received non-RDM response for RDM transaction');
+            const rpt = decodeRptMessage(packet.data) as RptMessage;
+            if (rpt.vector === RptVector.Status) {
+                throw new RdmnetError({
+                    message: `RPT status ${RptStatusCode[rpt.statusCode] ?? rpt.statusCode}${rpt.text ? `: ${rpt.text}` : ''}`,
+                    domain: 'rpt',
+                    code: 'PROTOCOL_ERROR',
+                    details: {statusCode: rpt.statusCode, text: rpt.text},
+                });
             }
-            return rpt.response;
+            if (rpt.vector !== RptVector.Notification) {
+                throw new Error('Received unexpected RPT message for RDM transaction');
+            }
+            return rpt.commands[0]!;
         });
 
-        await this.sendRptMessage({
-            vector: RptVector.RdmCommand,
-            sequence,
-            endpointId,
-            request,
-        });
+        await this.sendRptMessage({vector: RptVector.Request, header, command: request});
         return responsePromise;
     }
 
-    /** Sends an RPT status message and returns the generated sequence ID. */
-    public async sendStatus(statusCode: number, text = ''): Promise<number> {
-        const sequence = this.nextRdmnetSequence();
-        await this.sendRptMessage({
-            vector: RptVector.Status,
-            sequence,
-            statusCode,
-            text,
-        });
-        return sequence;
+    /** Sends an RPT Notification carrying one or more RDM responses (device/responder side). */
+    public async sendRdmNotification(header: RptHeader, responses: RdmResponse[]): Promise<void> {
+        await this.sendRptMessage({vector: RptVector.Notification, header, commands: responses});
+    }
+
+    /** Sends an RPT Status message (device/responder side error report). */
+    public async sendRptStatus(header: RptHeader, statusCode: RptStatusCode, text = ''): Promise<void> {
+        await this.sendRptMessage({vector: RptVector.Status, header, statusCode, text});
     }
 
     /**
-     * Sends an endpoint advertisement and updates local endpoint capability cache.
+     * Builds the header for replying to a received Request: source/dest
+     * swapped, same sequence number (per RPT routing/correlation rules).
      */
-    public async sendEndpointAdvertisement(
-        endpointId: number,
-        role: BrokerClientRole,
-        profiles: number[],
-    ): Promise<number> {
-        const sequence = this.nextRdmnetSequence();
-        await this.sendRptMessage({
-            vector: RptVector.EndpointAdvertisement,
-            sequence,
-            endpointId,
-            role,
-            profiles,
-        });
-        this.updateEndpointCapabilities(endpointId, role, profiles, 'local_advertisement');
-        return sequence;
-    }
-
-    /**
-     * Waits for endpoint advertisement acknowledgement for a specific sequence/endpoint pair.
-     */
-    public waitForEndpointAdvertisementAck(
-        sequence: number,
-        endpointId: number,
-        timeoutMs = this.requestTimeoutMs,
-    ): Promise<Extract<RptMessage, {vector: RptVector.EndpointAdvertisementAck}>> {
-        return this.waitForMessage((packet) => {
-            if (packet.vector !== RdmnetRootVector.Rpt) return false;
-            try {
-                const rpt = decodeRptMessage(packet.data);
-                return rpt.vector === RptVector.EndpointAdvertisementAck
-                    && rpt.sequence === sequence
-                    && rpt.endpointId === endpointId;
-            } catch {
-                return false;
-            }
-        }, timeoutMs).then((packet) => {
-            const rpt = decodeRptMessage(packet.data);
-            if (rpt.vector !== RptVector.EndpointAdvertisementAck) {
-                throw new Error('Expected endpoint advertisement ack');
-            }
-            return rpt;
-        });
+    public replyHeader(requestHeader: RptHeader): RptHeader {
+        return {
+            sourceUid: requestHeader.destUid,
+            sourceEndpointId: requestHeader.destEndpointId,
+            destUid: requestHeader.sourceUid,
+            destEndpointId: requestHeader.sourceEndpointId,
+            sequenceNumber: requestHeader.sequenceNumber,
+        };
     }
 
     private async connectInternal(): Promise<void> {
@@ -821,30 +620,12 @@ export class RdmnetClient extends EventEmitter<RdmnetClientEvents> {
                         }
                     }
 
-                    if (packet.vector === RdmnetRootVector.Llrp) {
-                        try {
-                            this.emit('llrpMessage', decodeLlrpMessage(packet.data));
-                        } catch (err) {
-                            this.emit('error', this.wrapProtocolError(err, 'llrp', 'LLRP_DECODE_ERROR', {
-                                rootVector: packet.vector,
-                            }));
-                        }
-                    }
-
                     if (packet.vector === RdmnetRootVector.Rpt) {
                         try {
                             const rpt = decodeRptMessage(packet.data);
-                            if (rpt.vector === RptVector.EndpointAdvertisement) {
-                                this.updateEndpointCapabilities(
-                                    rpt.endpointId,
-                                    rpt.role,
-                                    rpt.profiles,
-                                    'remote_advertisement',
-                                );
-                            }
                             this.emit('rptMessage', rpt);
-                            if (rpt.vector === RptVector.RdmResponse) {
-                                this.emit('rdmResponse', rpt);
+                            if (rpt.vector === RptVector.Notification) {
+                                this.emit('rdmNotification', rpt);
                             }
                         } catch (err) {
                             this.emit('error', this.wrapProtocolError(err, 'rpt', 'RPT_DECODE_ERROR', {
@@ -869,10 +650,8 @@ export class RdmnetClient extends EventEmitter<RdmnetClientEvents> {
             this.socket = null;
             this.rejectAllWaiters(new Error('RDMnet socket closed'));
             this.setBrokerState(BrokerSessionState.Disconnected);
-            this.brokerClientId = null;
-            this.brokerNegotiatedRole = null;
-            this.brokerNegotiatedProfile = null;
-            this.endpointCapabilities.clear();
+            this.brokerUid = null;
+            this.knownClients.clear();
             this.emit('disconnect', hadError);
             if (!this.manualClose && this.autoReconnect) {
                 this.scheduleReconnect();
@@ -926,17 +705,8 @@ export class RdmnetClient extends EventEmitter<RdmnetClientEvents> {
         this.stopHeartbeat();
         if (this.heartbeatIntervalMs <= 0) return;
         this.heartbeatTimer = setInterval(() => {
-            if (!this.isConnected()) return;
-            const action = this.brokerState === BrokerSessionState.Connected || this.brokerState === BrokerSessionState.Bound
-                ? this.sendBrokerMessage({
-                    vector: BrokerVector.Heartbeat,
-                    sequence: this.nextRdmnetSequence(),
-                })
-                : this.sendPacket({
-                    vector: this.heartbeatVector,
-                    data: Buffer.alloc(0),
-                });
-            action.then(() => {
+            if (!this.isConnected() || this.brokerState !== BrokerSessionState.Connected) return;
+            this.sendBrokerMessage({vector: BrokerVector.Null}).then(() => {
                 this.emit('heartbeat');
             }).catch((err) => {
                 this.emit('error', this.wrapProtocolError(err, 'transport', 'PROTOCOL_ERROR'));
@@ -990,10 +760,10 @@ export class RdmnetClient extends EventEmitter<RdmnetClientEvents> {
         }
     }
 
-    private nextRdmnetSequence(): number {
-        this.rdmnetSequence = (this.rdmnetSequence + 1) >>> 0;
-        if (this.rdmnetSequence === 0) this.rdmnetSequence = 1;
-        return this.rdmnetSequence;
+    private nextRptSequence(): number {
+        this.rptSequence = (this.rptSequence + 1) >>> 0;
+        if (this.rptSequence === 0) this.rptSequence = 1;
+        return this.rptSequence;
     }
 
     private setBrokerState(next: BrokerSessionState): void {
@@ -1002,49 +772,44 @@ export class RdmnetClient extends EventEmitter<RdmnetClientEvents> {
         this.emit('brokerState', next);
     }
 
-    private handleBrokerMessage(message: BrokerMessage): void {
-        if (message.vector === BrokerVector.Disconnect) {
-            this.setBrokerState(BrokerSessionState.TcpConnected);
-            this.brokerClientId = null;
-            this.brokerNegotiatedRole = null;
-            this.brokerNegotiatedProfile = null;
-            this.endpointCapabilities.clear();
-        }
+    private replaceKnownClients(clients: RptClientEntry[]): void {
+        this.knownClients = new Map(clients.map((c) => [uidToString(c.uid), c]));
+        this.emit('clientListUpdated');
     }
 
-    private updateEndpointCapabilities(
-        endpointId: number,
-        role: BrokerClientRole | null,
-        profiles: number[],
-        source: EndpointCapabilities['source'],
-    ): void {
-        const normalizedProfiles = Array.from(new Set(profiles.map((p) => p & 0xffff))).sort((a, b) => a - b);
-        const prev = this.endpointCapabilities.get(endpointId);
-        const next: EndpointCapabilities = {
-            endpointId,
-            role,
-            profiles: normalizedProfiles,
-            source,
-            updatedAt: Date.now(),
-        };
-        const changed = !prev
-            || prev.role !== next.role
-            || prev.source !== next.source
-            || prev.profiles.length !== next.profiles.length
-            || prev.profiles.some((p, i) => p !== next.profiles[i]);
-        this.endpointCapabilities.set(endpointId, next);
-        if (changed) this.emit('endpointCapabilitiesUpdated', endpointId);
+    private handleBrokerMessage(message: BrokerMessage): void {
+        switch (message.vector) {
+            case BrokerVector.Disconnect:
+                this.setBrokerState(BrokerSessionState.TcpConnected);
+                this.brokerUid = null;
+                this.knownClients.clear();
+                this.emit('clientListUpdated');
+                break;
+            case BrokerVector.ConnectedClientList:
+                this.replaceKnownClients(message.clients);
+                break;
+            case BrokerVector.ClientAdd:
+            case BrokerVector.ClientEntryChange:
+                for (const client of message.clients) this.knownClients.set(uidToString(client.uid), client);
+                this.emit('clientListUpdated');
+                break;
+            case BrokerVector.ClientRemove:
+                for (const client of message.clients) this.knownClients.delete(uidToString(client.uid));
+                this.emit('clientListUpdated');
+                break;
+            default:
+                break;
+        }
     }
 
     private wrapProtocolError(
         err: unknown,
-        domain: 'transport' | 'broker' | 'rpt' | 'ept' | 'llrp',
+        domain: 'transport' | 'broker' | 'rpt' | 'ept',
         code:
             | 'STREAM_FRAMING_ERROR'
             | 'BROKER_DECODE_ERROR'
             | 'RPT_DECODE_ERROR'
             | 'EPT_DECODE_ERROR'
-            | 'LLRP_DECODE_ERROR'
             | 'PROTOCOL_ERROR',
         details?: Record<string, unknown>,
     ): RdmnetError {

@@ -249,13 +249,15 @@ export const buildArtTrigger = (trigger: ArtTrigger): Buffer => {
  * @returns Parsed reply or `null` when payload is not an ArtPollReply.
  */
 export const parseArtPollReply = (buffer: Buffer): ArtPollReply | null => {
-    if (buffer.length < 239) return null;
+    // Spec: consumers shall accept as valid a packet of 207 bytes or larger.
+    if (buffer.length < 207) return null;
     const id = buffer.toString('ascii', 0, 8);
     if (id !== ARTNET_ID) return null;
     const opcode = buffer.readUInt16LE(8);
     if (opcode !== OpCode.OpPollReply) return null;
     const ip = `${buffer[10]}.${buffer[11]}.${buffer[12]}.${buffer[13]}`;
-    const port = buffer.readUInt16BE(14);
+    // Port is transmitted low byte first per spec.
+    const port = buffer.readUInt16LE(14);
     const netSwitch = buffer[18];
     const subSwitch = buffer[19];
     const status1 = buffer[23];
@@ -265,8 +267,8 @@ export const parseArtPollReply = (buffer: Buffer): ArtPollReply | null => {
     const numPorts = buffer.readUInt16BE(172);
     const swIn = Array.from(buffer.subarray(186, 190));
     const swOut = Array.from(buffer.subarray(190, 194));
-    const status2 = buffer[201];
-    const status3 = buffer[211];
+    const status2 = buffer.length > 212 ? buffer[212] : undefined;
+    const status3 = buffer.length > 217 ? buffer[217] : undefined;
     return {
         ip,
         port,

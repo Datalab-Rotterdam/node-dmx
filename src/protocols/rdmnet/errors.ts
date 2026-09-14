@@ -2,23 +2,21 @@
  * Structured RDMnet error taxonomy.
  * @module rdmnet/errors
  */
-import {BrokerStatusCode} from './broker';
+import {ConnectionStatusCode} from './broker';
 
-export type RdmnetErrorDomain = 'transport' | 'broker' | 'rpt' | 'ept' | 'llrp' | 'negotiation' | 'timeout';
+export type RdmnetErrorDomain = 'transport' | 'broker' | 'rpt' | 'ept' | 'llrp' | 'timeout';
 
 export type RdmnetErrorCode =
-    | 'BROKER_REJECTED'
-    | 'BROKER_INVALID_SCOPE'
-    | 'BROKER_UNAUTHORIZED'
-    | 'BROKER_ALREADY_CONNECTED'
-    | 'BROKER_INVALID_REQUEST'
+    | 'BROKER_SCOPE_MISMATCH'
+    | 'BROKER_CAPACITY_EXCEEDED'
+    | 'BROKER_DUPLICATE_UID'
+    | 'BROKER_INVALID_CLIENT_ENTRY'
+    | 'BROKER_INVALID_UID'
     | 'STREAM_FRAMING_ERROR'
     | 'BROKER_DECODE_ERROR'
     | 'RPT_DECODE_ERROR'
     | 'EPT_DECODE_ERROR'
     | 'LLRP_DECODE_ERROR'
-    | 'NEGOTIATION_ROLE_MISMATCH'
-    | 'NEGOTIATION_PROFILE_MISMATCH'
     | 'RESPONSE_TIMEOUT'
     | 'PROTOCOL_ERROR';
 
@@ -44,17 +42,17 @@ export class RdmnetError extends Error {
     }
 }
 
-const BROKER_STATUS_ERROR_META: Record<BrokerStatusCode, {code: RdmnetErrorCode; message: string}> = {
-    [BrokerStatusCode.Ok]: {code: 'PROTOCOL_ERROR', message: 'Broker returned OK in error path'},
-    [BrokerStatusCode.Rejected]: {code: 'BROKER_REJECTED', message: 'Broker rejected request'},
-    [BrokerStatusCode.InvalidScope]: {code: 'BROKER_INVALID_SCOPE', message: 'Broker scope is invalid'},
-    [BrokerStatusCode.Unauthorized]: {code: 'BROKER_UNAUTHORIZED', message: 'Broker authorization failed'},
-    [BrokerStatusCode.AlreadyConnected]: {code: 'BROKER_ALREADY_CONNECTED', message: 'Broker reports client already connected'},
-    [BrokerStatusCode.InvalidRequest]: {code: 'BROKER_INVALID_REQUEST', message: 'Broker reports request is invalid'},
+const BROKER_STATUS_ERROR_META: Record<ConnectionStatusCode, {code: RdmnetErrorCode; message: string}> = {
+    [ConnectionStatusCode.Ok]: {code: 'PROTOCOL_ERROR', message: 'Broker returned OK in error path'},
+    [ConnectionStatusCode.ScopeMismatch]: {code: 'BROKER_SCOPE_MISMATCH', message: 'Broker scope does not match'},
+    [ConnectionStatusCode.CapacityExceeded]: {code: 'BROKER_CAPACITY_EXCEEDED', message: 'Broker capacity exceeded'},
+    [ConnectionStatusCode.DuplicateUid]: {code: 'BROKER_DUPLICATE_UID', message: 'Broker reports duplicate UID'},
+    [ConnectionStatusCode.InvalidClientEntry]: {code: 'BROKER_INVALID_CLIENT_ENTRY', message: 'Broker reports invalid client entry'},
+    [ConnectionStatusCode.InvalidUid]: {code: 'BROKER_INVALID_UID', message: 'Broker reports invalid UID'},
 };
 
 export const mapBrokerStatusToError = (
-    status: BrokerStatusCode,
+    status: ConnectionStatusCode,
     fallbackMessage: string,
     details?: Record<string, unknown>,
 ): RdmnetError => {

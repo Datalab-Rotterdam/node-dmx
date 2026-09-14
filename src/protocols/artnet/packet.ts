@@ -6,7 +6,7 @@
  * - Art-Net 4 Specification (opcode packets and field layouts)
  *   https://art-net.org.uk/downloads/art-net.pdf
  */
-import {ARTNET_ID, ARTNET_PROTOCOL_VERSION, DiagnosticsPriority, OpCode} from './constants';
+import {ARTNET_ID, ARTNET_PORT, ARTNET_PROTOCOL_VERSION, DiagnosticsPriority, NodeStyle, OpCode} from './constants';
 import {readNullTerminatedString, splitUniverseAddress} from './util';
 
 export type ArtDmxOptions = {
@@ -89,6 +89,16 @@ const writeHeader = (buffer: Buffer, opcode: OpCode): void => {
     buffer.write(ARTNET_ID, 0, 'ascii');
     buffer.writeUInt16LE(opcode, 8);
     buffer.writeUInt16BE(ARTNET_PROTOCOL_VERSION, 10);
+};
+
+/**
+ * Recognize an incoming ArtPoll payload (used by device/responder code that
+ * needs to answer with an ArtPollReply).
+ */
+export const parseArtPoll = (buffer: Buffer): boolean => {
+    if (buffer.length < 14) return false;
+    if (buffer.toString('ascii', 0, 8) !== ARTNET_ID) return false;
+    return buffer.readUInt16LE(8) === OpCode.OpPoll;
 };
 
 /**
@@ -284,4 +294,72 @@ export const parseArtPollReply = (buffer: Buffer): ArtPollReply | null => {
         status2,
         status3,
     };
+};
+
+/** Options for {@link buildArtPollReply} — a single-output-port device/responder reply. */
+export type ArtPollReplyOptions = {
+    /** This node's IPv4 address, dotted-quad. */
+    ip: string;
+    port?: number;
+    /** Max 17 ASCII chars (18-byte field, null-terminated). */
+    shortName?: string;
+    /** Max 63 ASCII chars (64-byte field, null-terminated). */
+    longName?: string;
+    nodeReport?: string;
+    /** 1-based universe advertised on the single output port. */
+    universe: number;
+    mac?: Buffer;
+    style?: NodeStyle;
+    /** ESTA manufacturer code (16-bit) — typically the responder's RDM UID manufacturer id. */
+    estaManufacturer?: number;
+};
+
+/**
+ * Build an ArtPollReply advertising one output port (i.e. a device that
+ * receives DMX — a fixture), so `ArtNetDiscovery.pollOnce()` and similar
+ * controllers can find it.
+ *
+ * NOTE: this covers the fields needed for basic discovery and status
+ * (IP/port, name/report, port config, RDM-capable flag). A few rarely-used
+ * optional fields (detailed Status2/Status3 capability bits, per-port
+ * GoodOutput detail beyond "active") are left at sensible defaults rather
+ * than exhaustively spec-verified — real controllers don't require them
+ * for basic discovery/RDM-over-Art-Net interop.
+ */
+export const buildArtPollReply = (options: ArtPollReplyOptions): Buffer => {
+    const buffer = Buffer.alloc(239);
+    buffer.write(ARTNET_ID, 0, 'ascii');
+    buffer.writeUInt16LE(OpCode.OpPollReply, 8);
+
+    const ipParts = options.ip.split('.').map((part) => Number(part) & 0xff);
+    for (let i = 0; i < 4; i++) buffer.writeUInt8(ipParts[i] ?? 0, 10 + i);
+    buffer.writeUInt16LE(options.port ?? ARTNET_PORT, 14); // Port: transmitted low byte first
+    buffer.writeUInt16BE(ARTNET_PROTOCOL_VERSION, 16);
+
+    const addr = splitUniverseAddress(options.universe);
+    const subNet = (addr.subUni >> 4) & 0x0f;
+    const uni = addr.subUni & 0x0f;
+    buffer.writeUInt8(addr.net, 18); // NetSwitch
+    buffer.writeUInt8(subNet, 19); // SubSwitch
+    buffer.writeUInt16BE(0xffff, 20); // Oem: unknown/not registered
+    buffer.writeUInt8(0, 22); // UbeaVersion
+    buffer.writeUInt8(0x02, 23); // Status1: RDM-capable flag set
+    buffer.writeUInt16BE(options.estaManufacturer ?? 0x7a70, 24); // EstaMan
+
+    Buffer.from((options.shortName ?? 'node-dmx').substring(0, 17), 'ascii').copy(buffer, 26);
+    Buffer.from((options.longName ?? 'node-dmx simulated fixture').substring(0, 63), 'ascii').copy(buffer, 44);
+    Buffer.from((options.nodeReport ?? '').substring(0, 63), 'ascii').copy(buffer, 108);
+
+    buffer.writeUInt16BE(1, 172); // NumPorts
+    buffer.writeUInt8(0x80, 174); // PortTypes[0]: port exists, DMX512 output
+    buffer.writeUInt8(0, 178); // GoodInput[0]
+    buffer.writeUInt8(0x80, 182); // GoodOutput[0]: data present/active
+    buffer.writeUInt8(0, 186); // SwIn[0]
+    buffer.writeUInt8(uni, 190); // SwOut[0]
+
+    buffer.writeUInt8(options.style ?? NodeStyle.StNode, 200);
+    if (options.mac) options.mac.copy(buffer, 201, 0, 6);
+    for (let i = 0; i < 4; i++) buffer.writeUInt8(ipParts[i] ?? 0, 207 + i); // BindIp
+
+    return buffer;
 };

@@ -11,7 +11,7 @@
 import {ARTNET_ID, ARTNET_PROTOCOL_VERSION, OpCode} from '../constants';
 import {splitUniverseAddress} from '../util';
 import type {UID} from './uid';
-import {uidFromBuffer} from './uid';
+import {uidFromBuffer, uidToBuffer} from './uid';
 
 export type ArtTodRequestOptions = {
     /** 1-based universe number. */
@@ -81,6 +81,38 @@ export const buildArtTodRequest = (options: ArtTodRequestOptions): Buffer => {
     return buffer;
 };
 
+export type ParsedArtTodRequest = {
+    net: number;
+    command: number;
+    addCount: number;
+    /** Requested Sub-Net/Universe byte(s); empty means "all ports". */
+    addresses: number[];
+};
+
+/**
+ * Parse an incoming OpTodRequest (device/responder side: a controller is
+ * asking "what UIDs do you have?").
+ */
+export const parseArtTodRequest = (buffer: Buffer): ParsedArtTodRequest | null => {
+    if (buffer.length < 24) return null;
+    if (buffer.toString('ascii', 0, 8) !== ARTNET_ID) return null;
+    if (buffer.readUInt16LE(8) !== OpCode.OpTodRequest) return null;
+    const addCount = buffer.readUInt8(23);
+    const addresses: number[] = [];
+    for (let i = 0; i < addCount && 24 + i < buffer.length; i++) addresses.push(buffer.readUInt8(24 + i));
+    return {net: buffer.readUInt8(21), command: buffer.readUInt8(22), addCount, addresses};
+};
+
+export type ParsedArtTodControl = {net: number; command: number; address: number};
+
+/** Parse an incoming OpTodControl (e.g. AtcFlush requesting a fresh ToD). */
+export const parseArtTodControl = (buffer: Buffer): ParsedArtTodControl | null => {
+    if (buffer.length < 24) return null;
+    if (buffer.toString('ascii', 0, 8) !== ARTNET_ID) return null;
+    if (buffer.readUInt16LE(8) !== OpCode.OpTodControl) return null;
+    return {net: buffer.readUInt8(21), command: buffer.readUInt8(22), address: buffer.readUInt8(23)};
+};
+
 /** Build OpTodControl packet. */
 export const buildArtTodControl = (options: ArtTodControlOptions): Buffer => {
     const address = splitUniverseAddress(options.universe);
@@ -120,6 +152,37 @@ export const buildArtRdm = (options: ArtRdmPacket): Buffer => {
     return buffer;
 };
 
+export type ArtTodDataOptions = {
+    /** 1-based universe number. */
+    universe: number;
+    /** UIDs to report (a device/responder normally reports just its own). */
+    uids: UID[];
+    blockCount?: number;
+    /** Echoes the request's Command field; 0x00 for a normal ToD reply. */
+    commandResponse?: number;
+};
+
+/** Build an OpTodData reply (device/responder side: "here are my UID(s)"). */
+export const buildArtTodData = (options: ArtTodDataOptions): Buffer => {
+    const address = splitUniverseAddress(options.universe);
+    const buffer = Buffer.alloc(28 + options.uids.length * 6);
+    writeHeader(buffer, OpCode.OpTodData);
+    buffer.writeUInt8(1, 12); // RdmVer
+    buffer.writeUInt8(0, 13); // Port
+    for (let i = 14; i <= 19; i++) buffer.writeUInt8(0, i); // Spare1-6
+    buffer.writeUInt8(0, 20); // BindIndex
+    buffer.writeUInt8(address.net, 21);
+    buffer.writeUInt8(options.commandResponse ?? 0x00, 22);
+    buffer.writeUInt8(address.subUni, 23);
+    buffer.writeUInt16BE(options.uids.length, 24); // UidTotal
+    buffer.writeUInt8(options.blockCount ?? 0, 26);
+    buffer.writeUInt8(options.uids.length, 27);
+    for (let i = 0; i < options.uids.length; i++) {
+        uidToBuffer(options.uids[i]!).copy(buffer, 28 + i * 6);
+    }
+    return buffer;
+};
+
 /**
  * Parse OpTodData into strongly-typed fields.
  * @returns Parsed data or `null` when payload is not OpTodData.
@@ -146,4 +209,29 @@ export const parseArtTodData = (buffer: Buffer): ArtTodData | null => {
     }
     const universe = ((net & 0x7f) << 8) | address;
     return {universe: universe + 1, net, address, uidTotal, blockCount, uidCount, uids};
+};
+
+export type ParsedArtRdm = {
+    net: number;
+    command: number;
+    address: number;
+    /** Embedded RDM frame with its leading 0xCC start code restored. */
+    rdmPacket: Buffer;
+};
+
+/**
+ * Parse an incoming OpRdm (device/responder side, or a controller reading a
+ * reply). Restores the leading 0xCC start code that {@link buildArtRdm}
+ * strips before embedding.
+ */
+export const parseArtRdm = (buffer: Buffer): ParsedArtRdm | null => {
+    if (buffer.length < 25) return null;
+    if (buffer.toString('ascii', 0, 8) !== ARTNET_ID) return null;
+    if (buffer.readUInt16LE(8) !== OpCode.OpRdm) return null;
+    return {
+        net: buffer.readUInt8(21),
+        command: buffer.readUInt8(22),
+        address: buffer.readUInt8(23),
+        rdmPacket: Buffer.concat([Buffer.from([0xcc]), buffer.subarray(24)]),
+    };
 };

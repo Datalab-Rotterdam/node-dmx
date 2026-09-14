@@ -34,15 +34,38 @@ export enum RdmResponseType {
     ACK_OVERFLOW = 0x03,
 }
 
+/** RDM NACK reason codes (ANSI E1.20 Table A-17). */
+export enum RdmNackReason {
+    UNKNOWN_PID = 0x0000,
+    FORMAT_ERROR = 0x0001,
+    HARDWARE_FAULT = 0x0002,
+    PROXY_REJECT = 0x0003,
+    WRITE_PROTECT = 0x0004,
+    UNSUPPORTED_COMMAND_CLASS = 0x0005,
+    DATA_OUT_OF_RANGE = 0x0006,
+    BUFFER_FULL = 0x0007,
+    PACKET_SIZE_UNSUPPORTED = 0x0008,
+    SUB_DEVICE_OUT_OF_RANGE = 0x0009,
+    PROXY_BUFFER_FULL = 0x000a,
+}
+
+/** RDM protocol version (major.minor as one u16BE), current version 1.0. */
+export const RDM_PROTOCOL_VERSION = 0x0100;
+
 /** Commonly used Parameter IDs (PIDs). */
 export const PIDS = {
     DISC_UNIQUE_BRANCH: 0x0001,
     DISC_MUTE: 0x0002,
     DISC_UN_MUTE: 0x0003,
+    QUEUED_MESSAGE: 0x0020,
+    SUPPORTED_PARAMETERS: 0x0050,
     DEVICE_INFO: 0x0060,
     DEVICE_MODEL_DESCRIPTION: 0x0080,
     MANUFACTURER_LABEL: 0x0081,
+    DEVICE_LABEL: 0x0082,
+    SOFTWARE_VERSION_LABEL: 0x00c0,
+    DMX_PERSONALITY: 0x00e0,
+    DMX_PERSONALITY_DESCRIPTION: 0x00e1,
     DMX_START_ADDRESS: 0x00f0,
     IDENTIFY_DEVICE: 0x1000,
-    QUEUED_MESSAGE: 0x0020,
 } as const;

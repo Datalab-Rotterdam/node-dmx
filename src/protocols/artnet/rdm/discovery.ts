@@ -12,7 +12,43 @@ const DISCOVERY_PREAMBLE = 0xfe;
 const DISCOVERY_SEPARATOR = 0xaa;
 const DISCOVERY_PREAMBLE_LEN = 7;
 
-function decodeDiscoveryResponse(buffer: Buffer): UID | null {
+/**
+ * Build a DISC_UNIQUE_BRANCH discovery response frame for `uid` (ANSI E1.20
+ * §5.1: 7×0xFE preamble + 0xAA separator, then each of the 6 UID bytes and
+ * the 2 checksum bytes transmitted as an `(byte|0xAA), (byte|0x55)` pair so
+ * a receiver can recover the original byte via AND — this is a distinct
+ * framing from a normal ACK/NACK response frame, with no 0xCC start code).
+ * The checksum is the 16-bit sum of the 12 *encoded* UID bytes, matching
+ * {@link decodeDiscoveryResponse} and verified against OLA's reference decoder.
+ */
+export function encodeDiscoveryResponse(uid: UID): Buffer {
+    const uidBytes = uidToBuffer(uid);
+    const encodedUid = Buffer.alloc(12);
+    for (let i = 0; i < 6; i++) {
+        encodedUid[i * 2] = uidBytes[i]! | 0xaa;
+        encodedUid[i * 2 + 1] = uidBytes[i]! | 0x55;
+    }
+
+    let sum = 0;
+    for (const byte of encodedUid) sum += byte;
+    sum &= 0xffff;
+
+    const encodedChecksum = Buffer.alloc(4);
+    encodedChecksum[0] = ((sum >> 8) & 0xff) | 0xaa;
+    encodedChecksum[1] = ((sum >> 8) & 0xff) | 0x55;
+    encodedChecksum[2] = (sum & 0xff) | 0xaa;
+    encodedChecksum[3] = (sum & 0xff) | 0x55;
+
+    return Buffer.concat([
+        Buffer.alloc(DISCOVERY_PREAMBLE_LEN, DISCOVERY_PREAMBLE),
+        Buffer.from([DISCOVERY_SEPARATOR]),
+        encodedUid,
+        encodedChecksum,
+    ]);
+}
+
+/** Decode a DISC_UNIQUE_BRANCH discovery response frame built by {@link encodeDiscoveryResponse}. */
+export function decodeDiscoveryResponse(buffer: Buffer): UID | null {
     const minLength = DISCOVERY_PREAMBLE_LEN + 1 + 12 + 4;
     if (buffer.length < minLength) return null;
 

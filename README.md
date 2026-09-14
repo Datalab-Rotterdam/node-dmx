@@ -22,7 +22,8 @@ It supports:
 | Core I/O          | DMX Receive / Listen             | ✅                      | ✅                        | ❌                      | `Receiver`, `ArtNetReceiver` — RDMnet carries RDM device management, not DMX slot data          |
 | Core I/O          | Synchronization / Discovery      | ✅                      | ✅ (ArtSync)              | n/a                      | `Sender.sendSync`, `UniverseDiscoverySource` (E1.31 §6/§8)                                      |
 | Device Discovery  | Controller/Node Discovery        | ⚠️ Discovery packets    | ✅                        | ✅                       | `ArtNetDiscovery`, `RdmnetDiscovery` (DNS-SD + mDNS), `LlrpManager`                              |
-| Device Management | RDM Messaging                    | ❌                      | ✅                        | ✅                       | `ArtNetRdmClient` full flow, `RdmnetClient` RPT `rdmTransaction`, `LlrpManager` RDM passthrough  |
+| Device Management | RDM Messaging (controller)       | ❌                      | ✅                        | ✅                       | `ArtNetRdmClient` full flow, `RdmnetClient` RPT `rdmTransaction`, `LlrpManager` RDM passthrough  |
+| Device Management | RDM Responder (fixture/device)   | n/a                      | ✅                        | ✅                       | `RdmResponder` core + `ArtNetRdmResponder` / `RdmnetClient.useRdmResponder` / `LlrpTarget`        |
 | Security          | Secure Transport                 | ❌                      | ❌                        | ✅                       | `RdmnetClient` supports `transport: 'tls'`, peer auth policy, post-connect auth hook            |
 | Ecosystem         | Fixture Plugin System            | ✅                      | ✅                        | ❌                       | Fixture API currently targets DMX output protocols                                              |
 | Compliance        | Formal Protocol Compliance Claim | ✅ E1.31 implementation | ✅ Art-Net implementation | ⚠️ Wire-format verified | RDMnet: root/Broker/RPT/LLRP wire-verified; full claim depends on third-party conformance runs  |
@@ -123,7 +124,37 @@ console.log(response);
 client.close();
 ```
 
-## 6. Fixtures (Higher-Level API)
+## 6. Simulate a Fixture (RDM Responder)
+`RdmResponder` is a transport-agnostic RDM *device* core — it answers GET/SET for the
+standard PID set (DEVICE_INFO, DMX_START_ADDRESS, IDENTIFY_DEVICE, DEVICE_LABEL,
+DMX_PERSONALITY, MANUFACTURER_LABEL, SUPPORTED_PARAMETERS, DISC_MUTE/UN_MUTE...) for you —
+no manual ACK/NACK frame or checksum handling. Three wrappers plug it into each transport:
+
+```ts
+import {ArtNetRdmResponder, RdmResponder} from 'node-dmx';
+
+const uid = {manufacturerId: 0x7a70, deviceId: 0x00000042};
+const responder = new RdmResponder({
+  uid,
+  deviceLabel: 'Sim Fixture 1',
+  dmxStartAddress: 1,
+  personalities: [{footprint: 3, description: 'RGB'}],
+  onIdentifyChange: (on) => console.log('identify', on),
+});
+
+// Art-Net: answers ArtPoll/ArtTodRequest/ArtRdm; discoverable via ArtNetDiscovery.
+const fixture = new ArtNetRdmResponder({responder, universe: 1});
+fixture.on('dmx', (frame) => console.log('levels', frame.subarray(0, 3)));
+```
+
+- **Art-Net**: `ArtNetRdmResponder` (also receives ArtDMX for the configured universe).
+- **RDMnet**: `RdmnetClient.useRdmResponder(responder)` — auto-answers inbound RPT Requests.
+- **LLRP**: `new LlrpTarget({..., onRdmCommand: (frame) => responder.respond(frame)})`.
+
+See `examples/artnet-fixture-simulator.ts`, `examples/rdmnet-fixture-simulator.ts`, and
+`examples/rdmnet-llrp-fixture-simulator.ts`.
+
+## 7. Fixtures (Higher-Level API)
 ```ts
 import {DMXController, Fixture, RGBDimmerFixture} from 'node-dmx';
 
@@ -149,7 +180,7 @@ Available built-in example fixture plugins:
 - `RGBDimmerFixture` (`4ch`: dimmer + RGB)
 - `RGBWW5Fixture` (`5ch`: R + G + B + warm white + cool white)
 
-## 7. Runnable Examples
+## 8. Runnable Examples
 All examples live in `examples/`.
 
 Core examples:
@@ -163,12 +194,15 @@ Core examples:
 - `examples/artnet-animate.ts`
 - `examples/artnet-listen-matrix.ts`
 - `examples/artnet-discover.ts`
+- `examples/artnet-fixture-simulator.ts` — simulate a DMX+RDM fixture
 - `examples/rdm-tod.ts`
 - `examples/rdmnet-listen.ts`
 - `examples/rdmnet-discover.ts`
 - `examples/rdmnet-interop-smoke.ts`
 - `examples/rdmnet-rdm-transaction.ts` — RDM GET over RPT
 - `examples/rdmnet-llrp-discover.ts` — real LLRP UDP device discovery
+- `examples/rdmnet-fixture-simulator.ts` — simulate an RDMnet RDM device
+- `examples/rdmnet-llrp-fixture-simulator.ts` — simulate an LLRP Target
 - `examples/fixture-rgbww5.ts`
 - `examples/list-network-interfaces.ts`
 
@@ -196,7 +230,7 @@ All `sacn-*` examples read `DMX_IFACE` to override the hardcoded interface IP:
 DMX_IFACE=192.168.1.50 npm run example/sacn-rainbow
 ```
 
-## 8. Common Options
+## 9. Common Options
 Useful options for `DMXController`:
 - `protocol`: `'sacn' | 'artnet'`
 - `iface`: local interface IPv4 address
@@ -211,7 +245,7 @@ RDMnet client options:
 - `requireTlsAuthorization`: reject unauthorized TLS peers (default `true` when `transport: 'tls'`)
 - `postConnectAuth`: async hook for environment-specific auth/profile checks
 
-## 9. RDMnet Interoperability/Conformance
+## 10. RDMnet Interoperability/Conformance
 Use real brokers/devices for compliance verification (not mocks only).
 
 Smoke-runner against a real broker:
@@ -235,7 +269,7 @@ Useful flags:
 - `RDMNET_INTEROP_CHECK_LISTS=1`: also validate the broker client-list request
 - `RDMNET_INTEROP_TIMEOUT_MS=5000`: per-request timeout override
 
-## 10. TypeDoc
+## 11. TypeDoc
 TypeDoc output uses `README.md` as the landing page.
 
 Build docs:

@@ -48,6 +48,7 @@ import {
     type RptMessage,
     type RptNotificationMessage,
 } from './rpt';
+import type {RdmResponder} from '../artnet/rdm/responder';
 import type {RdmRequest, RdmResponse} from '../artnet/rdm/types';
 import {uidToString, type UID} from '../artnet/rdm/uid';
 
@@ -565,6 +566,24 @@ export class RdmnetClient extends EventEmitter<RdmnetClientEvents> {
             destEndpointId: requestHeader.sourceEndpointId,
             sequenceNumber: requestHeader.sequenceNumber,
         };
+    }
+
+    /**
+     * Wires an {@link RdmResponder} to answer every inbound RPT Request
+     * automatically — no manual header-swapping or response-frame building.
+     * Call the returned function to stop responding.
+     */
+    public useRdmResponder(responder: RdmResponder): () => void {
+        const handler = (message: RptMessage): void => {
+            if (message.vector !== RptVector.Request) return;
+            const response = responder.handle(message.command);
+            if (!response) return;
+            this.sendRdmNotification(this.replyHeader(message.header), [response]).catch((err) => {
+                this.emit('error', this.wrapProtocolError(err, 'rpt', 'PROTOCOL_ERROR'));
+            });
+        };
+        this.on('rptMessage', handler);
+        return () => this.off('rptMessage', handler);
     }
 
     private async connectInternal(): Promise<void> {

@@ -72,10 +72,12 @@ import {
     LlrpVector,
     makeCid,
     parseRdmnetPacket,
+    PIDS,
     RdmCommandClass,
     RdmnetClient,
     RdmnetError,
     RdmnetRootVector,
+    RdmResponder,
     RdmResponseType,
     RptClientType,
     RptStatusCode,
@@ -819,5 +821,55 @@ describe('RdmnetClient', () => {
         const assertion = expect(wait).rejects.toMatchObject({domain: 'timeout', code: 'RESPONSE_TIMEOUT'});
         await vi.advanceTimersByTimeAsync(11);
         await assertion;
+    });
+
+    it('useRdmResponder() answers inbound RPT Requests automatically via RdmResponder', async () => {
+        const client = new RdmnetClient({host: '127.0.0.1', uid});
+        const connectPromise = client.connect();
+        const socket = sockets[0];
+        socket.emit('connect');
+        await connectPromise;
+
+        const rdm = new RdmResponder({uid, manufacturerLabel: 'Acme'});
+        client.useRdmResponder(rdm);
+
+        const controllerUid = {manufacturerId: 0x1234, deviceId: 0x01020304};
+        const header = {
+            sourceUid: controllerUid,
+            sourceEndpointId: 0,
+            destUid: uid,
+            destEndpointId: 0,
+            sequenceNumber: 7,
+        };
+        socket.emit('data', buildRdmnetPacket({
+            vector: RdmnetRootVector.Rpt,
+            data: encodeRptMessage({
+                vector: RptVector.Request,
+                header,
+                command: {
+                    destinationUid: uid,
+                    sourceUid: controllerUid,
+                    transactionNumber: 1,
+                    portId: 1,
+                    commandClass: RdmCommandClass.GET_COMMAND,
+                    pid: PIDS.MANUFACTURER_LABEL,
+                    parameterData: Buffer.alloc(0),
+                },
+            }),
+        }));
+
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        expect(socket.writes.length).toBe(1);
+        const sent = decodeRptMessage(parseRdmnetPacket(socket.writes[0]).data);
+        expect(sent.vector).toBe(RptVector.Notification);
+        if (sent.vector !== RptVector.Notification) throw new Error('expected notification');
+        expect(sent.header).toEqual({
+            sourceUid: uid,
+            sourceEndpointId: 0,
+            destUid: controllerUid,
+            destEndpointId: 0,
+            sequenceNumber: 7,
+        });
+        expect(sent.commands[0]!.parameterData.toString('ascii')).toBe('Acme');
     });
 });

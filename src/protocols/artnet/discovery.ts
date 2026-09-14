@@ -30,6 +30,7 @@ export interface ArtNetDiscoveryEvents {
 /** Utility class for discovering Art-Net nodes via ArtPoll. */
 export class ArtNetDiscovery extends EventEmitter<ArtNetDiscoveryEvents> {
     private readonly socket: Socket;
+    private readonly ready: Promise<void>;
 
     /**
      * Create a discovery helper that can send ArtPoll and receive replies.
@@ -39,13 +40,23 @@ export class ArtNetDiscovery extends EventEmitter<ArtNetDiscoveryEvents> {
         super();
         this.socket = createSocket('udp4');
         this.socket.on('error', (err) => this.emit('error', err));
-        if (options.bindAddress) {
-            this.socket.bind({address: options.bindAddress});
-        }
-        this.socket.setBroadcast(true);
         this.socket.on('message', (msg) => {
             const reply = parseArtPollReply(msg);
             if (reply) this.emit('reply', reply);
+        });
+        // setBroadcast() throws EBADF until the socket has actually finished
+        // binding — bind (even with no explicit address) and wait for it,
+        // since a caller may call sendPoll()/pollOnce() on the very next
+        // line, before the constructor's async bind would otherwise settle.
+        this.ready = new Promise<void>((resolve) => {
+            this.socket.bind(options.bindAddress ? {address: options.bindAddress} : {}, () => {
+                try {
+                    this.socket.setBroadcast(true);
+                } catch (err) {
+                    this.emit('error', err as Error);
+                }
+                resolve();
+            });
         });
     }
 
@@ -70,6 +81,7 @@ export class ArtNetDiscovery extends EventEmitter<ArtNetDiscoveryEvents> {
      * Send an ArtPoll packet without waiting for replies.
      */
     public async sendPoll(pollOptions: ArtPollOptions = {}, options: ArtNetDiscoveryOptions = {}): Promise<void> {
+        await this.ready;
         const packet = buildArtPoll(pollOptions);
         const port = options.port ?? ARTNET_PORT;
         await new Promise<void>((resolve, reject) => {

@@ -59,7 +59,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/DataLab-Rotterdam/node-dmx.git"
+    "url": "git+https://github.com/Datalab-Rotterdam/node-dmx.git"
   },
   "keywords": [
     "dmx",
@@ -87,7 +87,7 @@
   "license": "Apache-2.0",
   "type": "module",
   "bugs": {
-    "url": "https://github.com/DataLab-Rotterdam/node-dmx/issues"
+    "url": "https://github.com/Datalab-Rotterdam/node-dmx/issues"
   },
   "homepage": "https://datalab-rotterdam.github.io/node-dmx/",
   "publishConfig": {

@@ -1,3 +1,15 @@
+# [1.3.0](https://github.com/Datalab-Rotterdam/node-dmx/compare/v1.2.0...v1.3.0) (2026-11-22)
+
+
+### Bug Fixes
+
+* correct repository/bugs URL casing to match GitHub org ([fbd6d2c](https://github.com/Datalab-Rotterdam/node-dmx/commit/fbd6d2cfbbd7a127bd23f5a9c2d6cfad7a9ca729))
+
+
+### Features
+
+* harden sACN, Art-Net, RDM and RDMnet transports ([d6dc20a](https://github.com/Datalab-Rotterdam/node-dmx/commit/d6dc20af04c90faae49e40d3a9a2077a1eeb470c))
+
 # [1.2.0](https://github.com/DataLab-Rotterdam/node-dmx/compare/v1.1.1...v1.2.0) (2026-09-14)
 
 

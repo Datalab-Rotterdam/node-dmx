@@ -10,6 +10,7 @@ import {EventEmitter} from 'events';
 
 import {
     RDMNET_DEFAULT_HEARTBEAT_MS,
+    RDMNET_DEFAULT_HEARTBEAT_TIMEOUT_MS,
     RDMNET_DEFAULT_MAX_BUFFER_BYTES,
     RDMNET_DEFAULT_PORT,
     RDMNET_DEFAULT_RECONNECT_DELAY_MS,
@@ -18,8 +19,8 @@ import {
     RdmnetRootVector,
 } from './constants';
 import {
-    buildRdmnetPacket,
-    extractRdmnetPackets,
+    buildRdmnetTcpPacket,
+    extractRdmnetTcpPackets,
     makeCid,
     type RdmnetPacket,
     type RdmnetPacketOptions,
@@ -42,6 +43,7 @@ import {decodeEptMessage, encodeEptMessage, type EptMessage} from './ept-llrp';
 import {
     decodeRptMessage,
     encodeRptMessage,
+    isRdmResponseCommandClass,
     RptStatusCode,
     RptVector,
     type RptHeader,
@@ -109,6 +111,18 @@ export type RdmnetClientOptions = {
     reconnectMaxDelayMs?: number;
     /** Interval for keepalive heartbeats (Broker Null message) in milliseconds. */
     heartbeatIntervalMs?: number;
+    /**
+     * Inbound inactivity timeout while a Broker session is connected: if
+     * nothing is received from the Broker for this long, the connection is
+     * dropped (and auto-reconnected when enabled). Defaults to
+     * {@link RDMNET_DEFAULT_HEARTBEAT_TIMEOUT_MS} (E1.33: 45 s). `0` disables.
+     */
+    heartbeatTimeoutMs?: number;
+    /**
+     * After an automatic reconnect, re-run {@link RdmnetClient.startBrokerSession}
+     * with the options of the last successful session. Default: `true`.
+     */
+    restoreSessionOnReconnect?: boolean;
     /** Default timeout for request/response operations. */
     requestTimeoutMs?: number;
     /** Maximum buffered stream bytes before framing-corruption protection triggers. */
@@ -158,7 +172,14 @@ export interface RdmnetClientEvents {
     rptMessage: [message: RptMessage];
     /** Emitted for decoded RPT Notification messages (RDM responses). */
     rdmNotification: [message: RptNotificationMessage];
-    /** Emitted for transport/protocol/timeout/decode errors. */
+    /** Emitted after an automatic reconnect re-established the previous Broker session. */
+    sessionRestored: [];
+    /**
+     * Emitted for transport/protocol/timeout/decode errors. Only emitted while
+     * at least one `'error'` listener is attached, so unobserved errors never
+     * surface as an `ERR_UNHANDLED_ERROR` crash (failed operations still
+     * reject their own promises).
+     */
     error: [error: Error];
 }
 
@@ -191,6 +212,8 @@ export class RdmnetClient extends EventEmitter<RdmnetClientEvents> {
     private readonly reconnectDelayMs: number;
     private readonly reconnectMaxDelayMs: number;
     private readonly heartbeatIntervalMs: number;
+    private readonly heartbeatTimeoutMs: number;
+    private readonly restoreSessionOnReconnect: boolean;
     private readonly requestTimeoutMs: number;
     private readonly maxBufferBytes: number;
     private readonly transport: 'tcp' | 'tls';
@@ -205,6 +228,9 @@ export class RdmnetClient extends EventEmitter<RdmnetClientEvents> {
     private reconnectAttempts = 0;
     private reconnectTimer: NodeJS.Timeout | null = null;
     private heartbeatTimer: NodeJS.Timeout | null = null;
+    private inactivityTimer: NodeJS.Timeout | null = null;
+    /** Options of the last successfully started Broker session; replayed after auto-reconnect. */
+    private sessionOptions: BrokerSessionOptions | null = null;
     private waiters: Waiter[] = [];
     private rptSequence = 0;
 
@@ -226,6 +252,8 @@ export class RdmnetClient extends EventEmitter<RdmnetClientEvents> {
         this.reconnectDelayMs = options.reconnectDelayMs ?? RDMNET_DEFAULT_RECONNECT_DELAY_MS;
         this.reconnectMaxDelayMs = options.reconnectMaxDelayMs ?? RDMNET_DEFAULT_RECONNECT_MAX_DELAY_MS;
         this.heartbeatIntervalMs = options.heartbeatIntervalMs ?? RDMNET_DEFAULT_HEARTBEAT_MS;
+        this.heartbeatTimeoutMs = options.heartbeatTimeoutMs ?? RDMNET_DEFAULT_HEARTBEAT_TIMEOUT_MS;
+        this.restoreSessionOnReconnect = options.restoreSessionOnReconnect ?? true;
         this.requestTimeoutMs = options.requestTimeoutMs ?? RDMNET_DEFAULT_REQUEST_TIMEOUT_MS;
         this.maxBufferBytes = options.maxBufferBytes ?? RDMNET_DEFAULT_MAX_BUFFER_BYTES;
         this.transport = options.transport ?? 'tcp';
@@ -241,8 +269,8 @@ export class RdmnetClient extends EventEmitter<RdmnetClientEvents> {
      * and executes optional {@link RdmnetClientOptions.postConnectAuth}.
      */
     public async connect(): Promise<void> {
-        if (this.isConnected()) return;
         if (this.connectPromise) return this.connectPromise;
+        if (this.isConnected()) return;
 
         this.manualClose = false;
         this.connectPromise = this.connectInternal();
@@ -291,19 +319,22 @@ export class RdmnetClient extends EventEmitter<RdmnetClientEvents> {
     /** Gracefully closes the socket and resets session state. */
     public disconnect(): void {
         this.manualClose = true;
+        this.sessionOptions = null;
         this.stopReconnectTimer();
         this.stopHeartbeat();
+        this.stopInactivityTimer();
         this.rejectAllWaiters(new Error('RDMnet client disconnected'));
         this.socket?.end();
         this.socket = null;
+        this.streamBuffer = Buffer.alloc(0);
         this.setBrokerState(BrokerSessionState.Disconnected);
         this.brokerUid = null;
         this.knownClients.clear();
     }
 
-    /** Sends one ACN root packet. */
+    /** Sends one ACN root packet, framed with the E1.17 TCP preamble. */
     public async sendPacket(options: RdmnetPacketOptions): Promise<void> {
-        const packet = buildRdmnetPacket({
+        const packet = buildRdmnetTcpPacket({
             ...options,
             cid: options.cid ?? this.cid,
         });
@@ -319,9 +350,7 @@ export class RdmnetClient extends EventEmitter<RdmnetClientEvents> {
         timeoutMs = this.requestTimeoutMs,
     ): Promise<RdmnetPacket> {
         await this.connect();
-        const wait = this.waitForMessage(matcher, timeoutMs);
-        await this.sendPacket(options);
-        return wait;
+        return this.sendAndWait(() => this.sendPacket(options), matcher, timeoutMs);
     }
 
     /**
@@ -329,18 +358,55 @@ export class RdmnetClient extends EventEmitter<RdmnetClientEvents> {
      * Rejects with `RdmnetError(code=RESPONSE_TIMEOUT)` on timeout.
      */
     public waitForMessage(matcher: MessageMatcher, timeoutMs = this.requestTimeoutMs): Promise<RdmnetPacket> {
-        return new Promise<RdmnetPacket>((resolve, reject) => {
+        return this.createWaiter(matcher, timeoutMs).promise;
+    }
+
+    /**
+     * Registers a waiter, then runs `send`. If `send` fails the waiter is
+     * cancelled (so it can never reject later, unobserved) and the send error
+     * is rethrown. Registering first guarantees a fast reply isn't missed.
+     */
+    private async sendAndWait(
+        send: () => Promise<void>,
+        matcher: MessageMatcher,
+        timeoutMs: number,
+    ): Promise<RdmnetPacket> {
+        const waiter = this.createWaiter(matcher, timeoutMs);
+        // Mark handled up front: the waiter may be rejected (e.g. socket close)
+        // while `send` is still pending, before anyone awaits it.
+        waiter.promise.catch(() => {});
+        try {
+            await send();
+        } catch (err) {
+            waiter.cancel();
+            throw err;
+        }
+        return waiter.promise;
+    }
+
+    private createWaiter(
+        matcher: MessageMatcher,
+        timeoutMs: number,
+    ): {promise: Promise<RdmnetPacket>; cancel: () => void} {
+        let entry: Waiter | undefined;
+        const promise = new Promise<RdmnetPacket>((resolve, reject) => {
             const timeoutId = setTimeout(() => {
-                this.waiters = this.waiters.filter((w) => w.timeoutId !== timeoutId);
+                this.waiters = this.waiters.filter((w) => w !== entry);
                 reject(new RdmnetError({
                     message: `RDMnet response timed out after ${timeoutMs}ms`,
                     domain: 'timeout',
                     code: 'RESPONSE_TIMEOUT',
                 }));
             }, timeoutMs);
-
-            this.waiters.push({matcher, resolve, reject, timeoutId});
+            entry = {matcher, resolve, reject, timeoutId};
+            this.waiters.push(entry);
         });
+        const cancel = (): void => {
+            if (!entry) return;
+            clearTimeout(entry.timeoutId);
+            this.waiters = this.waiters.filter((w) => w !== entry);
+        };
+        return {promise, cancel};
     }
 
     /** Waits for a decoded broker message matching a type guard. */
@@ -375,12 +441,17 @@ export class RdmnetClient extends EventEmitter<RdmnetClientEvents> {
 
     /** Sends raw bytes to the connected transport socket. */
     public async sendRaw(data: Buffer | Uint8Array): Promise<void> {
-        if (!this.socket) {
-            throw new Error('RDMnet socket is not connected');
+        const socket = this.socket;
+        if (!socket || socket.destroyed) {
+            throw new RdmnetError({
+                message: 'RDMnet socket is not connected',
+                domain: 'transport',
+                code: 'PROTOCOL_ERROR',
+            });
         }
         const payload = Buffer.from(data);
         await new Promise<void>((resolve, reject) => {
-            this.socket!.write(payload, (err) => {
+            socket.write(payload, (err) => {
                 if (err) reject(err);
                 else resolve();
             });
@@ -419,26 +490,34 @@ export class RdmnetClient extends EventEmitter<RdmnetClientEvents> {
         this.brokerScope = scope;
 
         this.setBrokerState(BrokerSessionState.Connecting);
-        const connectReplyPromise = this.waitForBrokerMessage(
-            (message): message is Extract<BrokerMessage, {vector: BrokerVector.ConnectReply}> =>
-                message.vector === BrokerVector.ConnectReply,
-            timeoutMs,
-        );
-        await this.sendBrokerMessage({
-            vector: BrokerVector.Connect,
-            scope,
-            e133Version: options.e133Version ?? E133_VERSION,
-            searchDomain: options.searchDomain,
-            incrementalUpdates: options.incrementalUpdates,
-            clientEntry: {
-                clientProtocol: ClientProtocol.Rpt,
-                cid: this.cid,
-                uid: this.uid,
-                clientType: this.clientType,
-                bindingCid: Buffer.alloc(16),
-            },
-        });
-        const reply = await connectReplyPromise;
+        let replyPacket: RdmnetPacket;
+        try {
+            replyPacket = await this.sendAndWait(
+                () => this.sendBrokerMessage({
+                    vector: BrokerVector.Connect,
+                    scope,
+                    e133Version: options.e133Version ?? E133_VERSION,
+                    searchDomain: options.searchDomain,
+                    incrementalUpdates: options.incrementalUpdates,
+                    clientEntry: {
+                        clientProtocol: ClientProtocol.Rpt,
+                        cid: this.cid,
+                        uid: this.uid,
+                        clientType: this.clientType,
+                        bindingCid: Buffer.alloc(16),
+                    },
+                }),
+                (packet) => this.isBrokerVector(packet, BrokerVector.ConnectReply),
+                timeoutMs,
+            );
+        } catch (err) {
+            // Don't leave the session stuck in "connecting" (which would block retries).
+            if (this.getBrokerSessionState() === BrokerSessionState.Connecting) {
+                this.setBrokerState(this.isConnected() ? BrokerSessionState.Error : BrokerSessionState.Disconnected);
+            }
+            throw err;
+        }
+        const reply = decodeBrokerMessage(replyPacket.data) as Extract<BrokerMessage, {vector: BrokerVector.ConnectReply}>;
 
         if (reply.connectionStatus !== ConnectionStatusCode.Ok) {
             this.setBrokerState(BrokerSessionState.Error);
@@ -446,11 +525,13 @@ export class RdmnetClient extends EventEmitter<RdmnetClientEvents> {
         }
 
         this.brokerUid = reply.brokerUid;
+        this.sessionOptions = {...options, scope};
         this.setBrokerState(BrokerSessionState.Connected);
     }
 
     /** Sends broker disconnect and resets broker-bound state. */
     public async stopBrokerSession(reason = DisconnectReason.Shutdown): Promise<void> {
+        this.sessionOptions = null;
         if (!this.isConnected() || this.brokerState !== BrokerSessionState.Connected) return;
         await this.sendBrokerMessage({vector: BrokerVector.Disconnect, reason});
         this.setBrokerState(BrokerSessionState.TcpConnected);
@@ -460,13 +541,15 @@ export class RdmnetClient extends EventEmitter<RdmnetClientEvents> {
 
     /** Requests the Broker's connected-client list and updates the local cache. */
     public async requestClientList(timeoutMs = this.requestTimeoutMs): Promise<RptClientEntry[]> {
-        const replyPromise = this.waitForBrokerMessage(
-            (message): message is Extract<BrokerMessage, {vector: BrokerVector.ConnectedClientList}> =>
-                message.vector === BrokerVector.ConnectedClientList,
+        const replyPacket = await this.sendAndWait(
+            () => this.sendBrokerMessage({vector: BrokerVector.FetchClientList}),
+            (packet) => this.isBrokerVector(packet, BrokerVector.ConnectedClientList),
             timeoutMs,
         );
-        await this.sendBrokerMessage({vector: BrokerVector.FetchClientList});
-        const reply = await replyPromise;
+        const reply = decodeBrokerMessage(replyPacket.data) as Extract<
+            BrokerMessage,
+            {vector: BrokerVector.ConnectedClientList}
+        >;
         // The generic inbound-packet handler already applied this ConnectedClientList
         // to the cache (see handleBrokerMessage) before this waiter resolved.
         return reply.clients;
@@ -513,40 +596,59 @@ export class RdmnetClient extends EventEmitter<RdmnetClientEvents> {
     ): Promise<RdmResponse> {
         const timeoutMs = options.timeoutMs ?? this.requestTimeoutMs;
         const header = this.buildRptHeader(destUid, options.destEndpointId ?? 0);
-        const responsePromise = this.waitForMessage((packet) => {
-            if (packet.vector !== RdmnetRootVector.Rpt) return false;
-            try {
-                const rpt = decodeRptMessage(packet.data);
-                return (
-                    (rpt.vector === RptVector.Notification || rpt.vector === RptVector.Status)
-                    && rpt.header.sequenceNumber === header.sequenceNumber
-                );
-            } catch {
-                return false;
-            }
-        }, timeoutMs).then((packet) => {
-            const rpt = decodeRptMessage(packet.data) as RptMessage;
-            if (rpt.vector === RptVector.Status) {
-                throw new RdmnetError({
-                    message: `RPT status ${RptStatusCode[rpt.statusCode] ?? rpt.statusCode}${rpt.text ? `: ${rpt.text}` : ''}`,
-                    domain: 'rpt',
-                    code: 'PROTOCOL_ERROR',
-                    details: {statusCode: rpt.statusCode, text: rpt.text},
-                });
-            }
-            if (rpt.vector !== RptVector.Notification) {
-                throw new Error('Received unexpected RPT message for RDM transaction');
-            }
-            return rpt.commands[0]!;
-        });
+        const packet = await this.sendAndWait(
+            () => this.sendRptMessage({vector: RptVector.Request, header, command: request}),
+            (candidate) => {
+                if (candidate.vector !== RdmnetRootVector.Rpt) return false;
+                try {
+                    const rpt = decodeRptMessage(candidate.data);
+                    return (
+                        (rpt.vector === RptVector.Notification || rpt.vector === RptVector.Status)
+                        && rpt.header.sequenceNumber === header.sequenceNumber
+                    );
+                } catch {
+                    return false;
+                }
+            },
+            timeoutMs,
+        );
 
-        await this.sendRptMessage({vector: RptVector.Request, header, command: request});
-        return responsePromise;
+        const rpt = decodeRptMessage(packet.data) as RptMessage;
+        if (rpt.vector === RptVector.Status) {
+            throw new RdmnetError({
+                message: `RPT status ${RptStatusCode[rpt.statusCode] ?? rpt.statusCode}${rpt.text ? `: ${rpt.text}` : ''}`,
+                domain: 'rpt',
+                code: 'PROTOCOL_ERROR',
+                details: {statusCode: rpt.statusCode, text: rpt.text},
+            });
+        }
+        if (rpt.vector !== RptVector.Notification) {
+            throw new Error('Received unexpected RPT message for RDM transaction');
+        }
+        // A Notification answering a Request may echo the original command
+        // first; pick the first actual RDM response.
+        const response = rpt.commands.find((command) => isRdmResponseCommandClass(command.commandClass));
+        if (!response) {
+            throw new RdmnetError({
+                message: 'RPT Notification carried no RDM response',
+                domain: 'rpt',
+                code: 'PROTOCOL_ERROR',
+            });
+        }
+        return response;
     }
 
-    /** Sends an RPT Notification carrying one or more RDM responses (device/responder side). */
-    public async sendRdmNotification(header: RptHeader, responses: RdmResponse[]): Promise<void> {
-        await this.sendRptMessage({vector: RptVector.Notification, header, commands: responses});
+    /**
+     * Sends an RPT Notification carrying one or more RDM responses (device/responder side).
+     * Pass `originalCommand` when answering an RPT Request: E1.33 requires the
+     * original RDM command to be included ahead of the response(s).
+     */
+    public async sendRdmNotification(
+        header: RptHeader,
+        responses: RdmResponse[],
+        originalCommand?: RdmRequest,
+    ): Promise<void> {
+        await this.sendRptMessage({vector: RptVector.Notification, header, originalCommand, commands: responses});
     }
 
     /** Sends an RPT Status message (device/responder side error report). */
@@ -578,8 +680,8 @@ export class RdmnetClient extends EventEmitter<RdmnetClientEvents> {
             if (message.vector !== RptVector.Request) return;
             const response = responder.handle(message.command);
             if (!response) return;
-            this.sendRdmNotification(this.replyHeader(message.header), [response]).catch((err) => {
-                this.emit('error', this.wrapProtocolError(err, 'rpt', 'PROTOCOL_ERROR'));
+            this.sendRdmNotification(this.replyHeader(message.header), [response], message.command).catch((err) => {
+                this.emitError(this.wrapProtocolError(err, 'rpt', 'PROTOCOL_ERROR'));
             });
         };
         this.on('rptMessage', handler);
@@ -603,8 +705,14 @@ export class RdmnetClient extends EventEmitter<RdmnetClientEvents> {
             });
         this.socket = socket;
         this.streamBuffer = Buffer.alloc(0);
+        /** Set once this socket completed connect (+TLS/auth); only then does its loss trigger auto-reconnect. */
+        let established = false;
 
         socket.on('data', (chunk) => {
+            if (this.socket !== socket) return; // stale socket
+            if (this.brokerState === BrokerSessionState.Connected) this.armInactivityTimer();
+
+            let packets: RdmnetPacket[];
             try {
                 const merged = new Uint8Array(this.streamBuffer.length + chunk.length);
                 merged.set(this.streamBuffer, 0);
@@ -613,66 +721,51 @@ export class RdmnetClient extends EventEmitter<RdmnetClientEvents> {
                 if (this.streamBuffer.length > this.maxBufferBytes) {
                     throw new Error(`RDMnet stream buffer exceeded ${this.maxBufferBytes} bytes (possible framing corruption)`);
                 }
-                const {packets, remainder} = extractRdmnetPackets(this.streamBuffer);
-                this.streamBuffer = remainder;
-
-                for (const packet of packets) {
-                    if (packet.vector === RdmnetRootVector.Broker) {
-                        try {
-                            const broker = decodeBrokerMessage(packet.data);
-                            this.handleBrokerMessage(broker);
-                            this.emit('brokerMessage', broker);
-                        } catch (err) {
-                            this.emit('error', this.wrapProtocolError(err, 'broker', 'BROKER_DECODE_ERROR', {
-                                rootVector: packet.vector,
-                            }));
-                        }
-                    }
-
-                    if (packet.vector === RdmnetRootVector.Ept) {
-                        try {
-                            this.emit('eptMessage', decodeEptMessage(packet.data));
-                        } catch (err) {
-                            this.emit('error', this.wrapProtocolError(err, 'ept', 'EPT_DECODE_ERROR', {
-                                rootVector: packet.vector,
-                            }));
-                        }
-                    }
-
-                    if (packet.vector === RdmnetRootVector.Rpt) {
-                        try {
-                            const rpt = decodeRptMessage(packet.data);
-                            this.emit('rptMessage', rpt);
-                            if (rpt.vector === RptVector.Notification) {
-                                this.emit('rdmNotification', rpt);
-                            }
-                        } catch (err) {
-                            this.emit('error', this.wrapProtocolError(err, 'rpt', 'RPT_DECODE_ERROR', {
-                                rootVector: packet.vector,
-                            }));
-                        }
-                    }
-
-                    this.resolveWaiters(packet);
-                    this.emit('message', packet);
-                }
+                const extracted = extractRdmnetTcpPackets(this.streamBuffer, this.maxBufferBytes);
+                packets = extracted.packets;
+                this.streamBuffer = extracted.remainder;
             } catch (err) {
-                this.emit('error', this.wrapProtocolError(err, 'transport', 'STREAM_FRAMING_ERROR'));
+                // Stream sync is lost and cannot be recovered: drop the buffer and
+                // the connection (auto-reconnect, if enabled, starts a clean stream).
+                this.streamBuffer = Buffer.alloc(0);
+                this.emitError(this.wrapProtocolError(err, 'transport', 'STREAM_FRAMING_ERROR'));
+                socket.destroy();
+                return;
+            }
+
+            for (const packet of packets) {
+                if (this.socket !== socket) break;
+                try {
+                    this.handlePacket(packet);
+                } catch (err) {
+                    this.emitError(this.wrapProtocolError(err, 'transport', 'PROTOCOL_ERROR'));
+                }
             }
         });
 
         socket.on('error', (err) => {
-            this.emit('error', this.wrapProtocolError(err, 'transport', 'PROTOCOL_ERROR'));
+            // Errors during connect are reported through connect()'s rejection;
+            // stale sockets are ignored. emitError never throws when unobserved.
+            if (this.socket !== socket) return;
+            this.emitError(this.wrapProtocolError(err, 'transport', 'PROTOCOL_ERROR'));
         });
         socket.on('close', (hadError) => {
+            if (this.socket !== socket) {
+                // Stale socket: it was replaced by a newer connection (or
+                // manually disconnected). Never touch the current session.
+                if (this.socket === null) this.emit('disconnect', hadError);
+                return;
+            }
             this.stopHeartbeat();
+            this.stopInactivityTimer();
             this.socket = null;
+            this.streamBuffer = Buffer.alloc(0);
             this.rejectAllWaiters(new Error('RDMnet socket closed'));
             this.setBrokerState(BrokerSessionState.Disconnected);
             this.brokerUid = null;
             this.knownClients.clear();
             this.emit('disconnect', hadError);
-            if (!this.manualClose && this.autoReconnect) {
+            if (established && !this.manualClose && this.autoReconnect) {
                 this.scheduleReconnect();
             }
         });
@@ -700,7 +793,11 @@ export class RdmnetClient extends EventEmitter<RdmnetClientEvents> {
                         : undefined,
                 });
             }
+            if (this.socket !== socket || socket.destroyed) {
+                throw new Error('RDMnet socket closed during connect');
+            }
 
+            established = true;
             this.reconnectAttempts = 0;
             this.stopReconnectTimer();
             this.startHeartbeat();
@@ -709,15 +806,82 @@ export class RdmnetClient extends EventEmitter<RdmnetClientEvents> {
         };
 
         await new Promise<void>((resolve, reject) => {
+            let settled = false;
+            const fail = (err: Error): void => {
+                if (settled) return;
+                settled = true;
+                reject(err);
+            };
             const onConnected = (): void => {
-                void finalizeConnectedState().then(resolve).catch((err) => {
+                void finalizeConnectedState().then(() => {
+                    if (settled) return;
+                    settled = true;
+                    resolve();
+                }).catch((err: Error) => {
+                    fail(err);
                     socket.destroy();
-                    reject(err);
                 });
             };
             socket.once(this.transport === 'tls' ? 'secureConnect' : 'connect', onConnected);
-            socket.once('error', reject);
+            socket.once('error', (err) => fail(this.wrapProtocolError(err, 'transport', 'PROTOCOL_ERROR')));
+            socket.once('close', () => fail(new Error('RDMnet socket closed before connect completed')));
         });
+    }
+
+    /** Decodes one inbound root-layer packet and dispatches events/waiters. */
+    private handlePacket(packet: RdmnetPacket): void {
+        if (packet.vector === RdmnetRootVector.Broker) {
+            try {
+                const broker = decodeBrokerMessage(packet.data);
+                this.handleBrokerMessage(broker);
+                this.emit('brokerMessage', broker);
+            } catch (err) {
+                this.emitError(this.wrapProtocolError(err, 'broker', 'BROKER_DECODE_ERROR', {
+                    rootVector: packet.vector,
+                }));
+            }
+        }
+
+        if (packet.vector === RdmnetRootVector.Ept) {
+            try {
+                this.emit('eptMessage', decodeEptMessage(packet.data));
+            } catch (err) {
+                this.emitError(this.wrapProtocolError(err, 'ept', 'EPT_DECODE_ERROR', {
+                    rootVector: packet.vector,
+                }));
+            }
+        }
+
+        if (packet.vector === RdmnetRootVector.Rpt) {
+            try {
+                const rpt = decodeRptMessage(packet.data);
+                this.emit('rptMessage', rpt);
+                if (rpt.vector === RptVector.Notification) {
+                    this.emit('rdmNotification', rpt);
+                }
+            } catch (err) {
+                this.emitError(this.wrapProtocolError(err, 'rpt', 'RPT_DECODE_ERROR', {
+                    rootVector: packet.vector,
+                }));
+            }
+        }
+
+        this.resolveWaiters(packet);
+        this.emit('message', packet);
+    }
+
+    /** Emits `'error'` only when someone listens, so unobserved errors can't crash the process. */
+    private emitError(err: Error): void {
+        if (this.listenerCount('error') > 0) this.emit('error', err);
+    }
+
+    private isBrokerVector(packet: RdmnetPacket, vector: BrokerVector): boolean {
+        if (packet.vector !== RdmnetRootVector.Broker) return false;
+        try {
+            return decodeBrokerMessage(packet.data).vector === vector;
+        } catch {
+            return false;
+        }
     }
 
     private startHeartbeat(): void {
@@ -728,7 +892,7 @@ export class RdmnetClient extends EventEmitter<RdmnetClientEvents> {
             this.sendBrokerMessage({vector: BrokerVector.Null}).then(() => {
                 this.emit('heartbeat');
             }).catch((err) => {
-                this.emit('error', this.wrapProtocolError(err, 'transport', 'PROTOCOL_ERROR'));
+                this.emitError(this.wrapProtocolError(err, 'transport', 'PROTOCOL_ERROR'));
             });
         }, this.heartbeatIntervalMs);
     }
@@ -740,6 +904,31 @@ export class RdmnetClient extends EventEmitter<RdmnetClientEvents> {
         }
     }
 
+    /** (Re)starts the inbound inactivity watchdog for a connected Broker session. */
+    private armInactivityTimer(): void {
+        this.stopInactivityTimer();
+        if (this.heartbeatTimeoutMs <= 0) return;
+        const socket = this.socket;
+        if (!socket) return;
+        this.inactivityTimer = setTimeout(() => {
+            this.inactivityTimer = null;
+            if (this.socket !== socket) return;
+            this.emitError(new RdmnetError({
+                message: `No data received from Broker for ${this.heartbeatTimeoutMs}ms`,
+                domain: 'timeout',
+                code: 'HEARTBEAT_TIMEOUT',
+            }));
+            socket.destroy();
+        }, this.heartbeatTimeoutMs);
+    }
+
+    private stopInactivityTimer(): void {
+        if (this.inactivityTimer) {
+            clearTimeout(this.inactivityTimer);
+            this.inactivityTimer = null;
+        }
+    }
+
     private scheduleReconnect(): void {
         if (this.reconnectTimer) return;
         this.reconnectAttempts += 1;
@@ -747,11 +936,31 @@ export class RdmnetClient extends EventEmitter<RdmnetClientEvents> {
         this.emit('reconnecting', this.reconnectAttempts, delayMs);
         this.reconnectTimer = setTimeout(() => {
             this.reconnectTimer = null;
-            this.connect().catch((err) => {
-                this.emit('error', this.wrapProtocolError(err, 'transport', 'PROTOCOL_ERROR'));
-                if (!this.manualClose && this.autoReconnect) this.scheduleReconnect();
+            if (this.manualClose) return;
+            this.connect().then(() => this.restoreSession()).catch((err) => {
+                this.emitError(this.wrapProtocolError(err, 'transport', 'PROTOCOL_ERROR'));
+                if (!this.manualClose && this.autoReconnect && !this.isConnected()) this.scheduleReconnect();
             });
         }, delayMs);
+    }
+
+    /** Re-runs the Broker session handshake after an automatic reconnect. */
+    private async restoreSession(): Promise<void> {
+        const options = this.sessionOptions;
+        if (!options || !this.restoreSessionOnReconnect) return;
+        if (this.brokerState !== BrokerSessionState.TcpConnected) return;
+        const socket = this.socket;
+        try {
+            await this.startBrokerSession(options);
+            this.emit('sessionRestored');
+        } catch (err) {
+            this.emitError(this.wrapProtocolError(err, 'broker', 'PROTOCOL_ERROR'));
+            // A missing Connect Reply is transient: drop the link so the
+            // reconnect loop tries again. A Broker rejection is final.
+            if (err instanceof RdmnetError && err.code === 'RESPONSE_TIMEOUT' && socket && this.socket === socket) {
+                socket.destroy();
+            }
+        }
     }
 
     private stopReconnectTimer(): void {
@@ -788,6 +997,8 @@ export class RdmnetClient extends EventEmitter<RdmnetClientEvents> {
     private setBrokerState(next: BrokerSessionState): void {
         if (next === this.brokerState) return;
         this.brokerState = next;
+        if (next === BrokerSessionState.Connected) this.armInactivityTimer();
+        else this.stopInactivityTimer();
         this.emit('brokerState', next);
     }
 

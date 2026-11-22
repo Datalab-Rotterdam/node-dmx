@@ -31,7 +31,7 @@ It supports:
 This guide is written for students and first-time users: start simple, then move to advanced features.
 
 ## Requirements
-- Node.js 18+
+- Node.js 20+
 - A DMX-over-IP device (sACN or Art-Net)
 - Computer and lighting device on the same network
 
@@ -44,6 +44,9 @@ npm install node-dmx
 - A **universe** has 512 channels.
 - A **channel value** is 0-255.
 - You set values in memory, then call `flush()` to send them.
+- The controller re-sends every flushed universe about once a second
+  (`keepAliveMs`, default `1000`), because sACN receivers drop a source after
+  2.5 s of silence. Call `close()` when done to stop it.
 
 ## 1. Quick Start (sACN)
 ```ts
@@ -90,11 +93,26 @@ u2.setChannel(1, 128);
 await controller.flush(); // sends all dirty universes
 ```
 
+### Art-Net universe numbering
+By default Art-Net universes are **1-based** (universe `1` = Port-Address `0`),
+matching sACN. Most Art-Net consoles and nodes show the raw 0-based
+Port-Address instead; opt in with `artnetPortAddressing`:
+
+```ts
+const controller = new DMXController({protocol: 'artnet', artnetPortAddressing: true});
+controller.setChannel(0, 1, 255); // Port-Address 0 (Net 0, Sub-Net 0, Universe 0)
+```
+
+`ArtNetSender` accepts `portAddress` directly, and received ArtDMX packets
+carry both `universe` (1-based) and `portAddress` (0-based).
+
 ## 4. Device Discovery (Art-Net)
 ```ts
 import {ArtNetDiscovery} from 'node-dmx';
 
-const discovery = new ArtNetDiscovery();
+// Listens on UDP 6454 (where nodes send ArtPollReply). Pass `bindAddress`
+// to poll that interface's directed broadcast address.
+const discovery = new ArtNetDiscovery({bindAddress: '192.168.1.50'});
 const replies = await discovery.pollOnce();
 
 for (const node of replies) {
@@ -113,16 +131,24 @@ const client = new ArtNetRdmClient({host: '192.168.0.10'});
 const response = await client.rdmTransaction(1, {
   destinationUid: {manufacturerId: 0x7a70, deviceId: 0x00000001},
   sourceUid: {manufacturerId: 0x7a70, deviceId: 0x00000002},
-  transactionNumber: 1,
+  // transactionNumber is optional: the client auto-increments it (0-255, wrapping)
   portId: 1,
   subDevice: 0,
   commandClass: RdmCommandClass.GET_COMMAND,
   pid: PIDS.DEVICE_INFO,
 });
 
-console.log(response);
+console.log(response); // null on timeout
 client.close();
 ```
+
+Replies are matched to requests by transaction number, UIDs and command
+class, so concurrent requests are safe. Art-Net nodes send `OpRdm`/`ArtTodData`
+to UDP **6454**, so the client binds that port by default (`localPort`, with
+`reuseAddr: true`) and falls back to a random port if it's taken. On Windows,
+sharing 6454 with another socket in the same process (e.g. an `ArtNetReceiver`)
+can cause one of them to miss unicast replies; give each its own interface or
+use `localPort: 0` if your nodes reply to the source port.
 
 ## 6. Simulate a Fixture (RDM Responder)
 `RdmResponder` is a transport-agnostic RDM *device* core — it answers GET/SET for the
@@ -237,6 +263,24 @@ Useful options for `DMXController`:
 - `reuseAddr`: allow multiple listeners/senders on same UDP port
 - `unicastDestination`: send unicast instead of multicast/broadcast
 - `artSync`: send ArtSync after flush (Art-Net)
+- `sacnSyncUniverse`: E1.31 synchronization address; receivers hold frames until the sync packet sent after each flush
+- `keepAliveMs`: resend interval for unchanged universes (default `1000`, `0` disables)
+- `artnetPortAddressing`: use raw 0-based Art-Net Port-Addresses as universe ids
+
+Receiving sACN from several sources:
+```ts
+import {Receiver, Merger} from 'node-dmx';
+
+const receiver = new Receiver({universes: [1]});
+const merger = new Merger(receiver); // highest priority wins, HTP between equal priorities
+merger.on('merged', ({universe, data}) => console.log(universe, data[0]));
+receiver.on('sourceLost', (s) => console.log('lost', s.sourceName, s.reason));
+```
+The receiver applies the E1.31 sequence rules, reports sources that time out
+(2.5 s) or send Stream_Terminated via `sourceLost`, and emits non-zero START
+Code frames (e.g. `0xDD` priority) as `alternateStartCode` instead of `packet`.
+Malformed network input never raises `error` (sACN: `PacketCorruption`,
+Art-Net: `invalidPacket`), so a bad packet can't crash your process.
 
 RDMnet client options:
 - `uid`: **required** — this component's RDM UID (`{manufacturerId, deviceId}`), carried in the Broker Client Entry and every RPT header

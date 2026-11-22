@@ -3,6 +3,7 @@
  * @module sACN/util
  */
 import {randomUUID} from 'crypto';
+import {clampByte} from '../../core/utils';
 
 /**
  * Generates a random 16-byte CID (E1.31 §6.2.2 requires a per-component
@@ -86,10 +87,7 @@ export function objectify(buffer: Buffer): Payload {
  * @param value - Input number
  * @returns Integer between 0 and 255 (inclusive)
  */
-export const inRange = (value: number): number => {
-    if (typeof value !== 'number' || !isFinite(value)) return 0;
-    return Math.min(255, Math.max(0, Math.round(value)));
-};
+export const inRange = (value: number): number => clampByte(value);
 
 /**
  * Splits an unsigned integer into big-endian bytes.

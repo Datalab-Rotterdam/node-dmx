@@ -11,6 +11,7 @@ import {
     RootVector,
     UniverseDiscoveryVector,
 } from './constants';
+import {encodeSourceName} from './packet';
 
 const PREAMBLE_SIZE = 0x0010;
 const POSTAMBLE_SIZE = 0x0000;
@@ -112,9 +113,7 @@ export const buildUniverseDiscoveryPacket = ({
 
     buffer.writeUInt16BE(0x7000 | framingLength, 38);
     buffer.writeUInt32BE(ExtendedFrameVector.DISCOVERY, 40);
-    if (sourceName) {
-        Buffer.from(sourceName.substring(0, 64), 'ascii').copy(buffer, 44);
-    }
+    encodeSourceName(sourceName).copy(buffer, 44);
     // Reserved(4) at 108-111 already zero.
 
     buffer.writeUInt16BE(0x7000 | discoveryLength, 112);
@@ -182,11 +181,14 @@ export const parseUniverseDiscoveryPacket = (buffer: Buffer): ParsedUniverseDisc
     assert.strictEqual(buffer.readUInt32BE(114), UniverseDiscoveryVector.UNIVERSE_LIST);
 
     const cid = Buffer.from(buffer.subarray(22, 38));
-    const sourceName = buffer.toString('ascii', 44, 108).replace(/\0/g, '');
+    const nameEnd = buffer.indexOf(0, 44);
+    const sourceName = buffer.toString('utf8', 44, nameEnd === -1 || nameEnd > 108 ? 108 : nameEnd);
     const page = buffer.readUInt8(118);
     const lastPage = buffer.readUInt8(119);
     const universes: number[] = [];
-    for (let offset = 120; offset + 2 <= buffer.length; offset += 2) {
+    const discoveryLength = buffer.readUInt16BE(112) & 0x0fff;
+    const listEnd = Math.min(buffer.length, 112 + discoveryLength);
+    for (let offset = 120; offset + 2 <= listEnd; offset += 2) {
         universes.push(buffer.readUInt16BE(offset));
     }
     return {cid, sourceName, page, lastPage, universes};

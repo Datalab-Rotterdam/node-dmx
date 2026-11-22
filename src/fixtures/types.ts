@@ -50,8 +50,11 @@ export type Personality = {
     channels: number;
 };
 
-/** Plugin contract for a fixture model implementation. */
-export type FixtureModelPlugin = {
+/**
+ * Plugin contract for a fixture model implementation.
+ * @typeParam S Shape of the state object this fixture understands.
+ */
+export type FixtureModelPlugin<S extends FixtureState = FixtureState> = {
     /** Optional manufacturer id for matching. */
     manufacturerId?: number;
     /** Vendor label. */
@@ -64,14 +67,16 @@ export type FixtureModelPlugin = {
     defaultPersonalityId: string;
     /** Returns `true` when this plugin can represent the fixture identity. */
     match: (id: FixtureIdentity) => boolean;
+    // encode/decode use method syntax so typed plugins stay assignable to
+    // FixtureModelPlugin<FixtureState> (e.g. when stored in a registry).
     /** Encode fixture state into DMX bytes in-place. */
-    encode: (args: {
+    encode(args: {
         personalityId: string;
-        state: FixtureState;
+        state: Partial<S>;
         ctx: EncodeContext;
-    }) => void;
+    }): void;
     /** Optional decode path from DMX bytes to state object. */
-    decode?: (args: {personalityId: string; ctx: DecodeContext}) => FixtureState;
+    decode?(args: {personalityId: string; ctx: DecodeContext}): Partial<S>;
     /** Optional PID mappers for model-specific RDM data. */
     rdm?: {
         decodePid?: (pid: number, data: Uint8Array) => unknown;

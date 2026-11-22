@@ -23,11 +23,20 @@ import {
     type ArtTimeCode,
     type ArtTrigger,
 } from './packet';
+import {directedBroadcastAddress} from './util';
 
 export type ArtNetSenderConfiguration = {
-    /** 1-based universe number sent in OpDmx packet Port-Address fields. */
-    universe: number;
-    /** Destination node IP/hostname. Defaults to broadcast. */
+    /**
+     * 1-based universe number sent in OpDmx packet Port-Address fields
+     * (universe 1 = Port-Address 0). Ignored when `portAddress` is set.
+     */
+    universe?: number;
+    /** Raw 15-bit Port-Address (0-32767). Takes precedence over `universe`. */
+    portAddress?: number;
+    /**
+     * Destination node IP/hostname. Defaults to the directed broadcast address
+     * of `bindAddress`'s subnet, or `255.255.255.255` when that is unknown.
+     */
     host?: string;
     /** Destination UDP port. Defaults to 6454. */
     port?: number;
@@ -50,7 +59,10 @@ export interface ArtNetSenderEvents {
 export class ArtNetSender extends EventEmitter<ArtNetSenderEvents> {
     private readonly socket: Socket;
     private readonly config: ArtNetSenderConfiguration;
+    private readonly ready: Promise<void>;
+    private readonly host: string;
     private sequence = 0;
+    private closed = false;
 
     /**
      * Create an Art-Net sender.
@@ -58,31 +70,53 @@ export class ArtNetSender extends EventEmitter<ArtNetSenderEvents> {
      */
     constructor(config: ArtNetSenderConfiguration) {
         super();
+        if (config.universe === undefined && config.portAddress === undefined) {
+            throw new RangeError('ArtNetSender requires either `universe` or `portAddress`');
+        }
+        // Validate addressing eagerly so misconfiguration fails at construction.
+        buildArtDmx({universe: config.universe, portAddress: config.portAddress, sequence: 0, data: new Uint8Array(2)});
+
         this.config = config;
+        this.host = config.host
+            ?? (config.bindAddress ? directedBroadcastAddress(config.bindAddress) : undefined)
+            ?? '255.255.255.255';
         this.socket = createSocket('udp4');
-        this.socket.on('error', (err) => this.emit('error', err));
-        if (config.broadcast) {
-            this.socket.setBroadcast(true);
-        }
-        if (config.bindAddress) {
-            this.socket.bind({address: config.bindAddress});
-        }
+        this.socket.on('error', (err) => {
+            // Never let a socket error crash the process when nobody listens.
+            if (this.listenerCount('error') > 0) this.emit('error', err);
+        });
+        // setBroadcast() throws EBADF until the socket is bound, so bind first
+        // (ephemeral port unless an explicit address is requested) and gate
+        // every send on that.
+        this.ready = new Promise<void>((resolve, reject) => {
+            const onError = (err: Error) => reject(err);
+            this.socket.once('error', onError);
+            this.socket.bind(config.bindAddress ? {address: config.bindAddress, port: 0} : {port: 0}, () => {
+                this.socket.off('error', onError);
+                try {
+                    if (config.broadcast) this.socket.setBroadcast(true);
+                    resolve();
+                } catch (err) {
+                    reject(err as Error);
+                }
+            });
+        });
+        // Surface the failure on the first send instead of as an unhandled rejection.
+        this.ready.catch(() => undefined);
     }
 
     /**
-     * Send a raw DMX frame as ArtDMX.
+     * Send a raw DMX frame as ArtDMX. Frames shorter than 2 bytes or of odd
+     * length are zero-padded, as Art-Net requires an even length of 2-512.
      */
     public async sendRaw(data: Uint8Array | Buffer, options?: Partial<ArtDmxOptions>): Promise<void> {
-        const payload = Buffer.from(data);
-        if (payload.length < 2) {
-            throw new RangeError('ArtDMX payload must be at least 2 bytes');
-        }
         const sequence = this.config.sequence ? this.nextSequence() : 0;
         const packet = buildArtDmx({
             universe: this.config.universe,
+            portAddress: this.config.portAddress,
             sequence,
             physical: this.config.physical,
-            data: payload,
+            data,
             length: options?.length,
         });
         await this.sendPacket(packet);
@@ -131,10 +165,16 @@ export class ArtNetSender extends EventEmitter<ArtNetSenderEvents> {
     }
 
     /**
-     * Close the UDP socket.
+     * Close the UDP socket. Safe to call more than once.
      */
     public close(): void {
-        this.socket.close();
+        if (this.closed) return;
+        this.closed = true;
+        try {
+            this.socket.close();
+        } catch {
+            // Already closed.
+        }
     }
 
     private nextSequence(): number {
@@ -144,10 +184,11 @@ export class ArtNetSender extends EventEmitter<ArtNetSenderEvents> {
     }
 
     private async sendPacket(packet: Buffer): Promise<void> {
-        const host = this.config.host ?? '255.255.255.255';
+        if (this.closed) throw new Error('ArtNetSender is closed');
+        await this.ready;
         const port = this.config.port ?? ARTNET_PORT;
         await new Promise<void>((resolve, reject) => {
-            this.socket.send(packet, port, host, (err) => {
+            this.socket.send(packet, port, this.host, (err) => {
                 if (err) reject(err);
                 else resolve();
             });

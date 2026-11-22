@@ -12,9 +12,9 @@ import {buildSyncPacket} from './extended';
 export type SenderConfiguration = {
     /** Universe id (1-63999). */
     universe: number;
-    /** UDP port (default 5568). */
+    /** Destination UDP port (default 5568). The sender binds an ephemeral local port. */
     port?: number;
-    /** Enable socket address reuse. */
+    /** Enable socket address reuse (only relevant together with `bindPort`). */
     reuseAddr?: boolean;
     /** Optional periodic resend rate (packets/sec). */
     refreshRate?: number;
@@ -26,12 +26,14 @@ export type SenderConfiguration = {
     iface?: string;
     /** Send unicast to this host instead of multicast group. */
     useUnicastDestination?: string;
+    /** Local UDP port to bind. Defaults to `0` (ephemeral), so many senders can coexist. */
+    bindPort?: number;
 };
 
 export interface SenderEvents {
     /** Emitted when periodic resend health toggles between success/failure. */
     changedResendStatus: [success: boolean];
-    /** Emitted when resend loop encounters an error. */
+    /** Emitted when the socket or resend loop encounters an error. Only emitted when a listener is attached. */
     error: [error: Error];
 }
 
@@ -48,6 +50,9 @@ export class Sender extends EventEmitter<SenderEvents> {
     private syncSequence = 0;
     public resendStatus = false;
     private loopId: NodeJS.Timeout | undefined;
+    private readonly ready: Promise<void>;
+    private closed = false;
+    private closing: Promise<void> | undefined;
 
     private latestPacketOptions: Omit<Options, 'sequence' | 'universe'> | undefined;
 
@@ -66,9 +71,10 @@ export class Sender extends EventEmitter<SenderEvents> {
             defaultPacketOptions = {},
             iface,
             useUnicastDestination,
+            bindPort = 0,
         } = config;
 
-        if (universe < 1 || universe > 63999) {
+        if (!Number.isInteger(universe) || universe < 1 || universe > 63999) {
             throw new RangeError('Universe must be between 1 and 63999 (inclusive).');
         }
 
@@ -84,21 +90,30 @@ export class Sender extends EventEmitter<SenderEvents> {
         this.refreshRate = refreshRate;
 
         this.socket = createSocket({ type: 'udp4', reuseAddr });
+        this.socket.on('error', (err) => this.emitError(err));
 
-        this.socket.bind(port, () => {
-            if (iface) {
-                try {
-                    this.socket.setMulticastInterface(iface);
-                } catch (err) {
-                    const message = err instanceof Error ? err.message : String(err);
-                    console.warn(`Failed to set multicast interface "${iface}":`, message);
+        // Senders don't need the well-known port: binding 5568 would collide
+        // with other senders/receivers on the same host (EADDRINUSE).
+        this.ready = new Promise<void>((resolve, reject) => {
+            const onError = (err: Error) => reject(err);
+            this.socket.once('error', onError);
+            this.socket.bind(bindPort, () => {
+                this.socket.off('error', onError);
+                if (iface) {
+                    try {
+                        this.socket.setMulticastInterface(iface);
+                    } catch (err) {
+                        this.emitError(err as Error);
+                    }
                 }
-            }
+                resolve();
+            });
         });
+        this.ready.catch(() => undefined);
 
         if (refreshRate > 0) {
             const interval = 1000 / refreshRate;
-            this.loopId = setInterval(() => this.reSend(), interval);
+            this.loopId = setInterval(() => void this.reSend(), interval);
         }
     }
 
@@ -155,22 +170,24 @@ export class Sender extends EventEmitter<SenderEvents> {
         const cid = this.defaultPacketOptions.cid ?? randomCid();
         const buffer = buildSyncPacket({cid, sequence: this.syncSequence, syncAddress});
         this.syncSequence = (this.syncSequence + 1) % 256;
-        await this.sendBuffer(buffer, multicastGroup(syncAddress));
+        await this.sendBuffer(buffer, this.unicast ? this.destinationIp : multicastGroup(syncAddress));
     }
 
     private async reSend(): Promise<void> {
-        if (!this.latestPacketOptions) return;
+        if (!this.latestPacketOptions || this.closed) return;
 
         try {
             await this.send(this.latestPacketOptions);
             this.updateResendStatus(true);
         } catch (err) {
             this.updateResendStatus(false);
-            this.emit('error', err as Error);
+            this.emitError(err as Error);
         }
     }
 
-    private sendBuffer(buffer: Buffer, destinationIp: string = this.destinationIp): Promise<void> {
+    private async sendBuffer(buffer: Buffer, destinationIp: string = this.destinationIp, force = false): Promise<void> {
+        if (this.closed && !force) throw new Error('sACN Sender is closed');
+        await this.ready;
         return new Promise((resolve, reject) => {
             this.socket.send(buffer, this.port, destinationIp, (err) => {
                 if (err) reject(err);
@@ -186,13 +203,34 @@ export class Sender extends EventEmitter<SenderEvents> {
         }
     }
 
+    /**
+     * Stop the resend loop, send Stream_Terminated packets and close the
+     * socket. Returns immediately; use {@link closeAsync} to await completion.
+     * Safe to call more than once.
+     */
     public close(): this {
+        void this.closeAsync();
+        return this;
+    }
+
+    /** Like {@link close}, but resolves once termination packets are sent and the socket is closed. */
+    public closeAsync(): Promise<void> {
+        if (this.closing) return this.closing;
+        this.closed = true;
         if (this.loopId) {
             clearInterval(this.loopId);
             this.loopId = undefined;
         }
-        void this.terminateAndClose();
-        return this;
+        this.closing = this.terminateAndClose();
+        return this.closing;
+    }
+
+    private get unicast(): boolean {
+        return this.destinationIp !== multicastGroup(this.universe);
+    }
+
+    private emitError(err: Error): void {
+        if (this.listenerCount('error') > 0) this.emit('error', err);
     }
 
     /**
@@ -204,16 +242,27 @@ export class Sender extends EventEmitter<SenderEvents> {
         try {
             if (this.latestPacketOptions) {
                 for (let i = 0; i < 3; i++) {
-                    await this.send({
+                    const finalPacket: Options = {
+                        ...this.defaultPacketOptions,
                         ...this.latestPacketOptions,
                         options: FrameOptions.STREAM_TERMINATED,
-                    });
+                        universe: this.universe,
+                        sequence: this.sequence,
+                    };
+                    this.sequence = (this.sequence + 1) % 256;
+                    await this.sendBuffer(new Packet(finalPacket).buffer, this.destinationIp, true);
                 }
             }
         } catch {
             // Best-effort termination; still close the socket below.
         } finally {
-            this.socket.close();
+            await new Promise<void>((resolve) => {
+                try {
+                    this.socket.close(() => resolve());
+                } catch {
+                    resolve();
+                }
+            });
         }
     }
 }

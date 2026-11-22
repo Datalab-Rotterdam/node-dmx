@@ -5,9 +5,12 @@ import {DMXController} from '../core';
  */
 import {FixtureModelPlugin, FixtureState} from './types';
 
-/** Fixture instance bound to one universe/address/personality. */
-export class Fixture {
-    private state: FixtureState = {};
+/**
+ * Fixture instance bound to one universe/address/personality.
+ * @typeParam S State shape understood by the plugin.
+ */
+export class Fixture<S extends FixtureState = FixtureState> {
+    private state: Partial<S> = {};
 
     /**
      * Create a fixture binding.
@@ -19,12 +22,12 @@ export class Fixture {
      */
     constructor(
         private readonly dmx: DMXController,
-        private readonly plugin: FixtureModelPlugin,
+        private readonly plugin: FixtureModelPlugin<S>,
         private readonly universe: number,
         private readonly address: number,
         private readonly personalityId: string,
     ) {
-        if (address < 1 || address > 512) {
+        if (!Number.isInteger(address) || address < 1 || address > 512) {
             throw new RangeError(`Address must be 1-512, got ${address}`);
         }
         const personality = plugin.personalities.find((p) => p.id === personalityId);
@@ -44,8 +47,13 @@ export class Fixture {
     /**
      * Merge the given state into the current fixture state.
      */
-    public set(next: FixtureState): void {
+    public set(next: Partial<S>): void {
         this.state = {...this.state, ...next};
+    }
+
+    /** Current (merged) fixture state. */
+    public get(): Readonly<Partial<S>> {
+        return this.state;
     }
 
     /**

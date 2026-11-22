@@ -1,11 +1,14 @@
-import {FixtureModelPlugin} from '../../types';
+import {unitToByte as clamp8} from '../../../core/utils';
+import type {FixtureModelPlugin} from '../../types';
 
-/** Convert normalized value in the range 0-1 to DMX 0-255. */
-function clamp8(value: number): number {
-    if (value <= 0) return 0;
-    if (value >= 1) return 255;
-    return Math.round(value * 255);
-}
+/** State understood by {@link RGBWW5Fixture} (all values normalized 0..1). */
+export type RGBWW5State = {
+    dimmer: number;
+    rgbww: [number, number, number, number, number];
+    rgb: [number, number, number];
+    warmWhite: number;
+    coolWhite: number;
+};
 
 /**
  * Example 5-channel RGBWW fixture plugin.
@@ -22,7 +25,7 @@ function clamp8(value: number): number {
  * - or `rgb`: `[r, g, b]` plus `warmWhite` and `coolWhite`
  * - optional `dimmer` master value 0..1 applied to all channels
  */
-export const RGBWW5Fixture: FixtureModelPlugin = {
+export const RGBWW5Fixture: FixtureModelPlugin<RGBWW5State> = {
     manufacturerId: 0x1234,
     vendor: 'ExampleCo',
     model: 'RGBWW 5ch',
@@ -33,14 +36,9 @@ export const RGBWW5Fixture: FixtureModelPlugin = {
         if (personalityId !== '5ch') return;
         const f = ctx.frame;
         const base = ctx.base;
-        const dimmer = (state.dimmer as number) ?? 1;
-        const rgbww = (state.rgbww as [number, number, number, number, number]) ?? [
-            ((state.rgb as [number, number, number] | undefined) ?? [0, 0, 0])[0],
-            ((state.rgb as [number, number, number] | undefined) ?? [0, 0, 0])[1],
-            ((state.rgb as [number, number, number] | undefined) ?? [0, 0, 0])[2],
-            (state.warmWhite as number) ?? 0,
-            (state.coolWhite as number) ?? 0,
-        ];
+        const dimmer = state.dimmer ?? 1;
+        const rgb = state.rgb ?? [0, 0, 0];
+        const rgbww = state.rgbww ?? [rgb[0], rgb[1], rgb[2], state.warmWhite ?? 0, state.coolWhite ?? 0];
 
         f[base + 0] = clamp8(rgbww[0] * dimmer);
         f[base + 1] = clamp8(rgbww[1] * dimmer);

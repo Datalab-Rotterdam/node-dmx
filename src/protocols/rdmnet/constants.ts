@@ -8,6 +8,8 @@
  */
 export const RDMNET_DEFAULT_PORT = 8888;
 export const RDMNET_DEFAULT_HEARTBEAT_MS = 15000;
+/** Inbound inactivity timeout for a connected Broker session (E1.33 heartbeat timeout, 3x heartbeat). */
+export const RDMNET_DEFAULT_HEARTBEAT_TIMEOUT_MS = 45000;
 export const RDMNET_DEFAULT_REQUEST_TIMEOUT_MS = 5000;
 export const RDMNET_DEFAULT_RECONNECT_DELAY_MS = 500;
 export const RDMNET_DEFAULT_RECONNECT_MAX_DELAY_MS = 10000;

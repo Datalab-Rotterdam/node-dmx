@@ -12,9 +12,29 @@ import {
     ACN_PID,
     DEFAULT_CID,
     DmpVector,
+    FrameOptions,
     FrameVector,
     RootVector,
 } from './constants';
+
+/**
+ * Encode a source name into the 64-octet, NUL-terminated UTF-8 field used by
+ * E1.31 data and discovery packets. Truncates to 63 bytes on a character
+ * boundary so the terminator always fits.
+ */
+export const encodeSourceName = (name: string | undefined): Buffer => {
+    const field = Buffer.alloc(64, 0);
+    if (!name) return field;
+    let bytes = Buffer.from(name, 'utf8');
+    if (bytes.length > 63) {
+        let end = 63;
+        // Step back over UTF-8 continuation bytes (10xxxxxx) so we don't split a character.
+        while (end > 0 && (bytes[end]! & 0xc0) === 0x80) end--;
+        bytes = bytes.subarray(0, end);
+    }
+    bytes.copy(field);
+    return field;
+};
 
 export interface Options {
     /** Universe number (1-63999). */
@@ -81,7 +101,12 @@ export class Packet {
     private readonly firstAddress = 0;
     private readonly addressIncrement = 1;
     public propertyValueCount = 0x0201; // 1 + 512
-    private readonly startCode = 0;
+    /**
+     * DMX512-A START Code. `0x00` is ordinary dimmer data; other values carry
+     * alternate data (e.g. `0xDD` per-address priority). Receivers should only
+     * treat `0x00` frames as levels.
+     */
+    public startCode = 0;
     private payloadInput: Buffer | Payload = {};
 
     private useRawDmxValues: boolean = false;
@@ -115,16 +140,17 @@ export class Packet {
         // Root Layer
         assert.strictEqual(buf.readUInt16BE(0), this.preambleSize);
         assert.strictEqual(buf.readUInt16BE(2), this.postambleSize);
-        assert.deepStrictEqual(buf.subarray(4, 16), this.acnPid); // .subarray() is fine for assertion
+        assert.ok(buf.subarray(4, 16).equals(this.acnPid), 'Invalid ACN packet identifier');
         this.rootFl = buf.readUInt16BE(16);
         assert.strictEqual(buf.readUInt32BE(18), this.rootVector);
-        this.cid = Buffer.from(buf.subarray(22, 38)); // ✅ COPY to avoid shared memory
+        this.cid = Buffer.from(buf.subarray(22, 38)); // copy to avoid shared memory
 
         // Framing Layer
         this.frameFl = buf.readUInt16BE(38);
         assert.strictEqual(buf.readUInt32BE(40), this.frameVector);
-        // Extract sourceName (64 bytes, null-padded ASCII)
-        this.sourceName = buf.toString('ascii', 44, 108).replace(/\0/g, ''); // ✅ fixed: \0 not \\0
+        // Source name: 64-octet, NUL-terminated UTF-8 (E1.31 §6.2.2).
+        const nameEnd = buf.indexOf(0, 44);
+        this.sourceName = buf.toString('utf8', 44, nameEnd === -1 || nameEnd > 108 ? 108 : nameEnd);
         this.priority = buf.readUInt8(108);
         this.syncUniverse = buf.readUInt16BE(109);
         this.sequence = buf.readUInt8(111);
@@ -138,11 +164,35 @@ export class Packet {
         assert.strictEqual(buf.readUInt16BE(119), this.firstAddress);
         assert.strictEqual(buf.readUInt16BE(121), this.addressIncrement);
         this.propertyValueCount = buf.readUInt16BE(123);
-        assert.strictEqual(buf.readUInt8(125), this.startCode);
+        assert.ok(
+            this.propertyValueCount >= 1 && this.propertyValueCount <= 513,
+            `Invalid property value count ${this.propertyValueCount}`,
+        );
+        assert.ok(
+            buf.length >= 125 + this.propertyValueCount,
+            `Packet truncated: property value count ${this.propertyValueCount} needs ` +
+                `${125 + this.propertyValueCount} bytes, got ${buf.length}`,
+        );
+        this.startCode = buf.readUInt8(125);
 
-        // Copy payload to ensure independence
-        this.payloadInput = Buffer.from(buf.subarray(126)); // up to 512 bytes
+        // Copy payload (exactly propertyValueCount - 1 slots) to ensure independence
+        this.payloadInput = Buffer.from(buf.subarray(126, 125 + this.propertyValueCount));
         this.useRawDmxValues = false;
+    }
+
+    /** `true` when the Preview_Data option bit is set (visualisation only, not for live output). */
+    public get isPreview(): boolean {
+        return (this.options & FrameOptions.PREVIEW_DATA) !== 0;
+    }
+
+    /** `true` when the Stream_Terminated option bit is set (source is stopping this universe). */
+    public get isTerminated(): boolean {
+        return (this.options & FrameOptions.STREAM_TERMINATED) !== 0;
+    }
+
+    /** `true` when the Force_Synchronization option bit is set. */
+    public get forceSynchronization(): boolean {
+        return (this.options & FrameOptions.FORCE_SYNCHRONIZATION) !== 0;
     }
 
     private createFromOptions(options: Options): void {
@@ -163,11 +213,11 @@ export class Packet {
         }
         this.sourceName = options.sourceName || 'sACN nodejs';
         const priority = options.priority ?? 100;
-        if (priority < 0 || priority > 200) {
-            throw new RangeError(`Priority must be 0-200, got ${priority}`);
+        if (!Number.isInteger(priority) || priority < 0 || priority > 200) {
+            throw new RangeError(`Priority must be an integer 0-200, got ${priority}`);
         }
         this.priority = priority;
-        this.sequence = options.sequence;
+        this.sequence = options.sequence & 0xff;
         this.universe = options.universe;
         this.options = options.options ?? 0;
         this.syncUniverse = options.syncUniverse ?? 0;
@@ -191,12 +241,7 @@ export class Packet {
 
     /** Fully encoded E1.31 packet bytes ready to send over UDP. */
     public get buffer(): Buffer {
-        const sourceNameBuf = Buffer.alloc(64, 0);
-        if (this.sourceName) {
-            // Write up to 64 bytes, truncate if too long
-            const nameBytes = Buffer.from(this.sourceName.substring(0, 64), 'ascii');
-            nameBytes.copy(sourceNameBuf);
-        }
+        const sourceNameBuf = encodeSourceName(this.sourceName);
 
         const dmxData = Buffer.alloc(512, 0);
 

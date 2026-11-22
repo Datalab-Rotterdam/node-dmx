@@ -6,7 +6,7 @@ import {clampByte} from './utils';
 
 /** Mutable 512-channel DMX frame with dirty tracking. */
 export class Universe {
-    /** Universe number (1-63999 for sACN compatibility). */
+    /** Universe number (1-63999 for sACN compatibility, unless a custom range is given). */
     public readonly id: number;
     /** Raw 512-byte DMX frame. Channel 1 maps to index 0. */
     public readonly data: Uint8Array;
@@ -15,10 +15,12 @@ export class Universe {
     /**
      * Create a universe frame container.
      * @param id Universe identifier.
+     * @param range Allowed id range. Defaults to sACN's 1-63999; Art-Net
+     *   Port-Addresses use 0-32767.
      */
-    constructor(id: number) {
-        if (!Number.isInteger(id) || id < 1 || id > 63999) {
-            throw new RangeError(`Universe must be 1-63999, got ${id}`);
+    constructor(id: number, range: {min: number; max: number} = {min: 1, max: 63999}) {
+        if (!Number.isInteger(id) || id < range.min || id > range.max) {
+            throw new RangeError(`Universe must be ${range.min}-${range.max}, got ${id}`);
         }
         this.id = id;
         this.data = new Uint8Array(512);

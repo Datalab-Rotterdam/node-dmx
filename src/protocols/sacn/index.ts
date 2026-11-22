@@ -12,6 +12,7 @@ export {
 } from './constants';
 export * from './packet';
 export * from './receiver';
+export * from './merger';
 export * from './sender';
 export * from './extended';
 export * from './discovery';

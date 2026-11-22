@@ -10,6 +10,7 @@ import {createSocket, type Socket} from 'dgram';
 import {EventEmitter} from 'events';
 import {ARTNET_PORT} from './constants';
 import {buildArtPoll, type ArtPollOptions, parseArtPollReply, type ArtPollReply} from './packet';
+import {directedBroadcastAddress} from './util';
 
 export type ArtNetDiscoveryOptions = {
     /** Time window for collecting replies in `pollOnce`. */
@@ -18,6 +19,14 @@ export type ArtNetDiscoveryOptions = {
     bindAddress?: string;
     /** UDP port override (default Art-Net port 6454). */
     port?: number;
+    /**
+     * Local UDP port to receive replies on. Art-Net nodes send ArtPollReply to
+     * port 6454, so that is the default (bound with `reuseAddr`). Use `0` for
+     * an ephemeral port (only nodes that reply to the source port will be seen).
+     */
+    listenPort?: number;
+    /** Broadcast address to poll. Defaults to the directed broadcast of `bindAddress`, else `255.255.255.255`. */
+    broadcastAddress?: string;
 };
 
 export interface ArtNetDiscoveryEvents {
@@ -31,6 +40,8 @@ export interface ArtNetDiscoveryEvents {
 export class ArtNetDiscovery extends EventEmitter<ArtNetDiscoveryEvents> {
     private readonly socket: Socket;
     private readonly ready: Promise<void>;
+    private readonly broadcastAddress: string;
+    private closed = false;
 
     /**
      * Create a discovery helper that can send ArtPoll and receive replies.
@@ -38,26 +49,39 @@ export class ArtNetDiscovery extends EventEmitter<ArtNetDiscoveryEvents> {
      */
     constructor(options: ArtNetDiscoveryOptions = {}) {
         super();
-        this.socket = createSocket('udp4');
-        this.socket.on('error', (err) => this.emit('error', err));
+        this.broadcastAddress = options.broadcastAddress
+            ?? (options.bindAddress ? directedBroadcastAddress(options.bindAddress) : undefined)
+            ?? '255.255.255.255';
+        this.socket = createSocket({type: 'udp4', reuseAddr: true});
+        this.socket.on('error', (err) => {
+            if (this.listenerCount('error') > 0) this.emit('error', err);
+        });
         this.socket.on('message', (msg) => {
-            const reply = parseArtPollReply(msg);
-            if (reply) this.emit('reply', reply);
+            try {
+                const reply = parseArtPollReply(msg);
+                if (reply) this.emit('reply', reply);
+            } catch {
+                // Malformed reply from the network: ignore.
+            }
         });
         // setBroadcast() throws EBADF until the socket has actually finished
-        // binding — bind (even with no explicit address) and wait for it,
-        // since a caller may call sendPoll()/pollOnce() on the very next
-        // line, before the constructor's async bind would otherwise settle.
-        this.ready = new Promise<void>((resolve) => {
-            this.socket.bind(options.bindAddress ? {address: options.bindAddress} : {}, () => {
+        // binding — bind and wait for it, since a caller may call
+        // sendPoll()/pollOnce() on the very next line.
+        this.ready = new Promise<void>((resolve, reject) => {
+            const onError = (err: Error) => reject(err);
+            this.socket.once('error', onError);
+            const port = options.listenPort ?? ARTNET_PORT;
+            this.socket.bind(options.bindAddress ? {address: options.bindAddress, port} : {port}, () => {
+                this.socket.off('error', onError);
                 try {
                     this.socket.setBroadcast(true);
+                    resolve();
                 } catch (err) {
-                    this.emit('error', err as Error);
+                    reject(err as Error);
                 }
-                resolve();
             });
         });
+        this.ready.catch(() => undefined);
     }
 
     /**
@@ -70,10 +94,13 @@ export class ArtNetDiscovery extends EventEmitter<ArtNetDiscoveryEvents> {
         const replies: ArtPollReply[] = [];
         const handler = (reply: ArtPollReply) => replies.push(reply);
         this.on('reply', handler);
-        await this.sendPoll(pollOptions, options);
-        const timeout = options.timeoutMs ?? 1000;
-        await new Promise((resolve) => setTimeout(resolve, timeout));
-        this.off('reply', handler);
+        try {
+            await this.sendPoll(pollOptions, options);
+            const timeout = options.timeoutMs ?? 1000;
+            await new Promise((resolve) => setTimeout(resolve, timeout));
+        } finally {
+            this.off('reply', handler);
+        }
         return replies;
     }
 
@@ -85,7 +112,7 @@ export class ArtNetDiscovery extends EventEmitter<ArtNetDiscoveryEvents> {
         const packet = buildArtPoll(pollOptions);
         const port = options.port ?? ARTNET_PORT;
         await new Promise<void>((resolve, reject) => {
-            this.socket.send(packet, port, '255.255.255.255', (err) => {
+            this.socket.send(packet, port, options.broadcastAddress ?? this.broadcastAddress, (err) => {
                 if (err) reject(err);
                 else resolve();
             });
@@ -93,9 +120,15 @@ export class ArtNetDiscovery extends EventEmitter<ArtNetDiscoveryEvents> {
     }
 
     /**
-     * Close the UDP socket.
+     * Close the UDP socket. Safe to call more than once.
      */
     public close(): void {
-        this.socket.close();
+        if (this.closed) return;
+        this.closed = true;
+        try {
+            this.socket.close();
+        } catch {
+            // Already closed.
+        }
     }
 }

@@ -91,7 +91,7 @@ describe('ArtNetRdmClient (loopback UDP)', () => {
             fakeDevice!.send(response, rinfo.port, rinfo.address);
         });
 
-        client = new ArtNetRdmClient({host: '127.0.0.1', port: devicePort, timeoutMs: 300});
+        client = new ArtNetRdmClient({host: '127.0.0.1', port: devicePort, timeoutMs: 300, localPort: 0});
         const response = await client.rdmTransaction(1, request);
 
         expect(response).not.toBeNull();
@@ -126,7 +126,7 @@ describe('ArtNetRdmClient (loopback UDP)', () => {
             fakeDevice!.send(response, rinfo.port, rinfo.address);
         });
 
-        client = new ArtNetRdmClient({host: '127.0.0.1', port: devicePort, timeoutMs: 300});
+        client = new ArtNetRdmClient({host: '127.0.0.1', port: devicePort, timeoutMs: 300, localPort: 0});
         const response = await client.rdmTransaction(1, request);
 
         expect(response).not.toBeNull();

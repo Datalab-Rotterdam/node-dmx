@@ -52,11 +52,23 @@ function encodeName(name: string): Buffer {
     return Buffer.concat(parts);
 }
 
+/** Upper bound on compression-pointer jumps while decoding one name. */
+const MAX_NAME_JUMPS = 128;
+/** RFC 1035 maximum encoded name length. */
+const MAX_NAME_LENGTH = 255;
+
+/**
+ * Decode a (possibly compressed) DNS name. Compression pointers must point
+ * strictly backwards and at most {@link MAX_NAME_JUMPS} are followed, so a
+ * self-referencing or cyclic pointer throws instead of looping forever.
+ */
 function decodeName(buffer: Buffer, offset: number): {name: string; nextOffset: number} {
     const labels: string[] = [];
     let cursor = offset;
     let consumed = 0;
     let jumped = false;
+    let jumps = 0;
+    let nameLength = 0;
 
     while (true) {
         if (cursor >= buffer.length) throw new RangeError('DNS name pointer out of bounds');
@@ -68,14 +80,19 @@ function decodeName(buffer: Buffer, offset: number): {name: string; nextOffset: 
         if ((len & 0xc0) === 0xc0) {
             if (cursor + 1 >= buffer.length) throw new RangeError('DNS name compression pointer truncated');
             const ptr = ((len & 0x3f) << 8) | buffer[cursor + 1]!;
+            if (ptr >= cursor) throw new RangeError('DNS name compression pointer does not point backwards');
+            if (++jumps > MAX_NAME_JUMPS) throw new RangeError('DNS name has too many compression pointers');
             if (!jumped) consumed += 2;
             cursor = ptr;
             jumped = true;
             continue;
         }
+        if ((len & 0xc0) !== 0) throw new RangeError(`Unsupported DNS label type 0x${len.toString(16)}`);
         const start = cursor + 1;
         const end = start + len;
         if (end > buffer.length) throw new RangeError('DNS label exceeds packet size');
+        nameLength += len + 1;
+        if (nameLength > MAX_NAME_LENGTH) throw new RangeError('DNS name exceeds 255 bytes');
         labels.push(buffer.toString('utf8', start, end));
         cursor = end;
         if (!jumped) consumed += 1 + len;
@@ -123,6 +140,7 @@ function parseDnsRecords(buffer: Buffer): ParsedRecord[] {
     for (let i = 0; i < qd; i++) {
         const question = decodeName(buffer, offset);
         offset = question.nextOffset + 4;
+        if (offset > buffer.length) return [];
     }
 
     const total = answerCount + nsCount + arCount;
@@ -144,7 +162,7 @@ function parseDnsRecords(buffer: Buffer): ParsedRecord[] {
         if (type === DNS_TYPE.PTR) {
             data = decodeName(buffer, offset - rdLength).name;
         } else if (type === DNS_TYPE.SRV) {
-            if (rdLength >= 6) {
+            if (rdLength >= 7) {
                 const priority = rdata.readUInt16BE(0);
                 const weight = rdata.readUInt16BE(2);
                 const port = rdata.readUInt16BE(4);
@@ -154,8 +172,10 @@ function parseDnsRecords(buffer: Buffer): ParsedRecord[] {
         } else if (type === DNS_TYPE.TXT) {
             data = parseTxt(rdata);
         } else if (type === DNS_TYPE.A) {
+            if (rdLength !== 4) continue;
             data = `${rdata[0]}.${rdata[1]}.${rdata[2]}.${rdata[3]}`;
         } else if (type === DNS_TYPE.AAAA) {
+            if (rdLength !== 16) continue;
             const parts: string[] = [];
             for (let j = 0; j < 16; j += 2) parts.push(rdata.readUInt16BE(j).toString(16));
             data = parts.join(':');
@@ -210,6 +230,11 @@ export class RdmnetDiscovery {
             const socket = dgram.createSocket({type: 'udp4', reuseAddr: true});
             const instances = new Map<string, RdmnetServiceInstance>();
 
+            // Without a listener a socket 'error' (bind/send failure) would be
+            // thrown as an uncaught exception; discovery is best-effort, so
+            // errors are swallowed and the timeout still resolves.
+            socket.on('error', () => {});
+
             socket.on('message', (msg) => {
                 try {
                     const records = parseDnsRecords(msg);
@@ -251,7 +276,11 @@ export class RdmnetDiscovery {
             });
 
             setTimeout(() => {
-                socket.close();
+                try {
+                    socket.close();
+                } catch {
+                    // Already closed (e.g. after an error).
+                }
                 resolve(Array.from(instances.values()));
             }, timeoutMs);
         });

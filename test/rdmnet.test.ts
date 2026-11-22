@@ -54,6 +54,7 @@ import {
     BrokerSessionState,
     BrokerVector,
     buildRdmnetPacket,
+    buildRdmnetTcpPacket,
     ClientProtocol,
     ConnectionStatusCode,
     decodeBrokerMessage,
@@ -67,11 +68,13 @@ import {
     encodeRptMessage,
     EptVector,
     extractRdmnetPackets,
+    extractRdmnetTcpPackets,
     LLRP_BROADCAST_CID,
     LlrpComponentType,
     LlrpVector,
     makeCid,
     parseRdmnetPacket,
+    parseRdmnetTcpPacket,
     PIDS,
     RdmCommandClass,
     RdmnetClient,
@@ -83,6 +86,9 @@ import {
     RptStatusCode,
     RptVector,
 } from '../src';
+
+const parseWrite = (buf: Buffer | undefined) => parseRdmnetTcpPacket(buf!)[0]!;
+const EPT_DEST_CID = Buffer.alloc(16, 0x66);
 
 beforeEach(() => {
     sockets.length = 0;
@@ -139,6 +145,62 @@ describe('RDMnet packet helpers', () => {
     it('rejects root packets with trailing bytes', () => {
         const packet = buildRdmnetPacket({vector: 1, data: Buffer.from([1, 2, 3])});
         expect(() => parseRdmnetPacket(Buffer.concat([packet, Buffer.from([0])]))).toThrow(/trailing bytes/);
+    });
+
+    it('builds TCP packets with the E1.17 TCP preamble (PID + u32 PDU block size)', () => {
+        const cid = Buffer.alloc(16, 0x11);
+        const built = buildRdmnetTcpPacket({vector: RdmnetRootVector.Broker, data: Buffer.from([1, 2, 3]), cid});
+        expect(built.subarray(0, 12)).toEqual(Buffer.from('ASC-E1.17\0\0\0', 'ascii'));
+        // PDU block = root PDU = 23-byte header + 3 data bytes.
+        expect(built.readUInt32BE(12)).toBe(26);
+        expect(built.length).toBe(16 + 26);
+        expect(built[16]! >> 4).toBe(0xf);
+        const [parsed] = parseRdmnetTcpPacket(built);
+        expect(parsed).toMatchObject({vector: RdmnetRootVector.Broker, cid, data: Buffer.from([1, 2, 3])});
+    });
+
+    it('extracts TCP packets from a fragmented stream and keeps the remainder', () => {
+        const a = buildRdmnetTcpPacket({vector: 1, data: Buffer.from([1])});
+        const b = buildRdmnetTcpPacket({vector: 2, data: Buffer.from([2, 3])});
+        const stream = Buffer.concat([a, b.subarray(0, b.length - 1)]);
+        const extracted = extractRdmnetTcpPackets(stream);
+        expect(extracted.packets.map((p) => p.vector)).toEqual([1]);
+        expect(extracted.remainder.length).toBe(b.length - 1);
+        const rest = extractRdmnetTcpPackets(Buffer.concat([extracted.remainder, b.subarray(b.length - 1)]));
+        expect(rest.packets.map((p) => p.vector)).toEqual([2]);
+        expect(rest.remainder.length).toBe(0);
+    });
+
+    it('parses several root PDUs carried in one TCP PDU block', () => {
+        const one = buildRdmnetTcpPacket({vector: 5, data: Buffer.from([1])}).subarray(16);
+        const two = buildRdmnetTcpPacket({vector: 9, data: Buffer.from([2])}).subarray(16);
+        const header = Buffer.alloc(16);
+        Buffer.from('ASC-E1.17\0\0\0', 'ascii').copy(header, 0);
+        header.writeUInt32BE(one.length + two.length, 12);
+        const {packets} = extractRdmnetTcpPackets(Buffer.concat([header, one, two]));
+        expect(packets.map((p) => p.vector)).toEqual([5, 9]);
+    });
+
+    it('rejects TCP streams with a bad packet identifier, block size or root PDU', () => {
+        const good = buildRdmnetTcpPacket({vector: 1, data: Buffer.from([1])});
+        const badPid = Buffer.from(good);
+        badPid.write('X', 0, 'ascii');
+        expect(() => extractRdmnetTcpPackets(badPid)).toThrow(/packet identifier/);
+
+        const tinyBlock = Buffer.from(good);
+        tinyBlock.writeUInt32BE(3, 12);
+        expect(() => extractRdmnetTcpPackets(tinyBlock)).toThrow(/block size/);
+
+        const hugeBlock = Buffer.from(good);
+        hugeBlock.writeUInt32BE(0x7fffffff, 12);
+        expect(() => extractRdmnetTcpPackets(hugeBlock, 1024)).toThrow(/exceeds limit/);
+
+        const rootTooLong = Buffer.from(good);
+        rootTooLong.writeUInt16BE(0xffff, 17);
+        expect(() => extractRdmnetTcpPackets(rootTooLong)).toThrow(/exceeds PDU block/);
+
+        // The UDP-style preamble (used by LLRP) is not valid on the TCP stream.
+        expect(() => extractRdmnetTcpPackets(buildRdmnetPacket({vector: 1}))).toThrow();
     });
 });
 
@@ -205,12 +267,14 @@ describe('RPT helpers', () => {
         });
     });
 
-    it('rejects RPT PDUs with trailing bytes', () => {
+    it('ignores bytes after the RPT PDU (its own length field delimits it)', () => {
+        // The decoder trusts the RPT PDU's own length and leaves anything after
+        // it alone; root-layer framing is what bounds a packet end-to-end.
         const encoded = encodeRptMessage({vector: RptVector.Status, header, statusCode: 0, text: 'ok'});
-        expect(() => decodeRptMessage(Buffer.concat([encoded, Buffer.from([0])]))).not.toThrow();
-        // trailing bytes beyond the PDU's own length field are simply ignored by decodeRptMessage
-        // (the caller is expected to pass exactly one PDU's bytes); verify length mismatch is caught
-        // at the root-layer level instead, where extra bytes are rejected.
+        expect(decodeRptMessage(Buffer.concat([encoded, Buffer.from([0])]))).toMatchObject({
+            vector: RptVector.Status,
+            text: 'ok',
+        });
     });
 });
 
@@ -275,15 +339,43 @@ describe('Broker helpers', () => {
         expect(decodeBrokerMessage(fetch)).toEqual({vector: BrokerVector.FetchClientList});
     });
 
-    it('rejects a Client Entry with an unsupported client protocol', () => {
-        const encoded = encodeBrokerMessage({vector: BrokerVector.ConnectedClientList, clients: [clientEntry]});
-        // Client Entry's protocol vector lives 3 bytes into the entry, which starts
-        // right after the 5-byte Broker header.
-        encoded.writeUInt32BE(ClientProtocol.Ept, 5 + 3);
+    it('rejects a Connect whose single Client Entry has an unsupported client protocol', () => {
+        const encoded = encodeBrokerMessage({
+            vector: BrokerVector.Connect,
+            scope: 'default',
+            clientEntry,
+        });
+        // Client Entry starts after Broker header(5) + scope(63) + version(2) + domain(231) + flags(1).
+        encoded.writeUInt32BE(ClientProtocol.Ept, 5 + 63 + 2 + 231 + 1 + 3);
         expect(() => decodeBrokerMessage(encoded)).toThrow(/Unsupported client protocol/);
     });
 
-    it('rejects broker PDUs with trailing bytes', () => {
+    it('skips EPT Client Entries in a client list instead of failing the whole list', () => {
+        const other = {...clientEntry, uid: {manufacturerId: 0x7a70, deviceId: 0x00000002}};
+        const rptList = encodeBrokerMessage({vector: BrokerVector.ConnectedClientList, clients: [clientEntry, other]});
+        // Hand-build an EPT Client Entry: header(23) + one EPT sub-protocol entry (4 + 32 bytes).
+        const ept = Buffer.alloc(23 + 36);
+        ept.writeUInt8(0xf0, 0);
+        ept.writeUInt16BE(ept.length, 1);
+        ept.writeUInt32BE(ClientProtocol.Ept, 3);
+        Buffer.alloc(16, 0x99).copy(ept, 7);
+        ept.writeUInt32BE(0x7a700001, 23);
+        ept.write('my-protocol', 27, 'ascii');
+        // Insert the EPT entry between the two RPT entries and fix the Broker PDU length.
+        const firstEnd = 5 + 46;
+        const mixed = Buffer.concat([rptList.subarray(0, firstEnd), ept, rptList.subarray(firstEnd)]);
+        mixed.writeUInt8(0xf0 | ((mixed.length >> 16) & 0x0f), 0);
+        mixed.writeUInt16BE(mixed.length & 0xffff, 1);
+        expect(decodeBrokerMessage(mixed)).toEqual({vector: BrokerVector.ConnectedClientList, clients: [clientEntry, other]});
+
+        // A zero-length entry can't be skipped and must not loop forever.
+        const broken = Buffer.from(mixed);
+        broken.writeUInt8(0xf0, firstEnd);
+        broken.writeUInt16BE(0, firstEnd + 1);
+        expect(() => decodeBrokerMessage(broken)).toThrow(/Client Entry PDU length/);
+    });
+
+    it('ignores bytes after the Broker PDU (its own length field delimits it)', () => {
         const encoded = encodeBrokerMessage({vector: BrokerVector.Disconnect, reason: DisconnectReason.Shutdown});
         const withTrailing = Buffer.concat([encoded, Buffer.from([0])]);
         // decodeBrokerMessage trusts its own length field and ignores bytes beyond it;
@@ -294,20 +386,41 @@ describe('Broker helpers', () => {
 
 describe('EPT/LLRP helpers', () => {
     it('encodes and decodes EPT data/status messages', () => {
+        const destinationCid = Buffer.alloc(16, 0x42);
         const data = encodeEptMessage({
             vector: EptVector.Data,
-            sequence: 5,
+            destinationCid,
             manufacturerId: 0x7a70,
             protocolId: 1,
             payload: Buffer.from([1, 2, 3]),
         });
+        // EPT PDU: flags+len(3) + vector(4) + dest CID(16); Data PDU: flags+len(3) + mfr(2) + proto(2) + data.
+        expect(data.length).toBe(23 + 7 + 3);
+        expect(data.readUInt32BE(3)).toBe(EptVector.Data);
+        expect(data.subarray(7, 23)).toEqual(destinationCid);
+        expect(data.readUInt32BE(26)).toBe(0x7a700001);
         expect(decodeEptMessage(data)).toEqual({
             vector: EptVector.Data,
-            sequence: 5,
+            destinationCid,
             manufacturerId: 0x7a70,
             protocolId: 1,
             payload: Buffer.from([1, 2, 3]),
         });
+
+        const status = encodeEptMessage({vector: EptVector.Status, destinationCid, statusCode: 2, text: 'unknown vector'});
+        expect(status.readUInt16BE(26)).toBe(2);
+        expect(decodeEptMessage(status)).toEqual({
+            vector: EptVector.Status,
+            destinationCid,
+            statusCode: 2,
+            text: 'unknown vector',
+        });
+
+        expect(() => encodeEptMessage({vector: EptVector.Data, manufacturerId: 1, protocolId: 1, payload: Buffer.alloc(0)}))
+            .toThrow(/destinationCid/);
+        const truncated = Buffer.from(data);
+        truncated.writeUInt16BE(0xff, 24);
+        expect(() => decodeEptMessage(truncated)).toThrow(RangeError);
     });
 
     it('encodes and decodes an LLRP Probe Request/Reply pair with the full 27-byte header', () => {
@@ -384,9 +497,9 @@ describe('RdmnetClient', () => {
         const message = new Promise<number>((resolve) => {
             client.once('message', (packet) => resolve(packet.vector));
         });
-        const inbound = buildRdmnetPacket({
+        const inbound = buildRdmnetTcpPacket({
             vector: RdmnetRootVector.Ept,
-            data: encodeEptMessage({vector: EptVector.Status, sequence: 1, statusCode: 0, text: ''}),
+            data: encodeEptMessage({vector: EptVector.Status, destinationCid: EPT_DEST_CID, statusCode: 0, text: ''}),
         });
         socket.emit('data', inbound);
         await expect(message).resolves.toBe(RdmnetRootVector.Ept);
@@ -441,7 +554,7 @@ describe('RdmnetClient', () => {
             destEndpointId: 0,
             sequenceNumber: 1,
         };
-        socket.emit('data', buildRdmnetPacket({
+        socket.emit('data', buildRdmnetTcpPacket({
             vector: RdmnetRootVector.Rpt,
             data: encodeRptMessage({vector: RptVector.Status, header, statusCode: 0, text: ''}),
         }));
@@ -497,7 +610,7 @@ describe('RdmnetClient', () => {
         await Promise.resolve();
         expect(socket.writes.length).toBe(1);
 
-        const sentRoot = parseRdmnetPacket(socket.writes[0]);
+        const sentRoot = parseWrite(socket.writes[0]);
         const sentRpt = decodeRptMessage(sentRoot.data);
         expect(sentRpt.vector).toBe(RptVector.Request);
         if (sentRpt.vector !== RptVector.Request) throw new Error('Expected RPT Request');
@@ -513,7 +626,7 @@ describe('RdmnetClient', () => {
             pid: request.pid,
             parameterData: Buffer.from([1, 2, 3, 4]),
         };
-        socket.emit('data', buildRdmnetPacket({
+        socket.emit('data', buildRdmnetTcpPacket({
             vector: RdmnetRootVector.Rpt,
             data: encodeRptMessage({
                 vector: RptVector.Notification,
@@ -549,9 +662,9 @@ describe('RdmnetClient', () => {
         };
         const transaction = client.rdmTransaction(deviceUid, request, {timeoutMs: 1000});
         await Promise.resolve();
-        const sentRpt = decodeRptMessage(parseRdmnetPacket(socket.writes[0]).data);
+        const sentRpt = decodeRptMessage(parseWrite(socket.writes[0]).data);
 
-        socket.emit('data', buildRdmnetPacket({
+        socket.emit('data', buildRdmnetTcpPacket({
             vector: RdmnetRootVector.Rpt,
             data: encodeRptMessage({
                 vector: RptVector.Status,
@@ -584,14 +697,14 @@ describe('RdmnetClient', () => {
         const sessionStart = client.startBrokerSession({scope: 'default'});
         await Promise.resolve();
         expect(socket.writes.length).toBe(1);
-        const connectReqRoot = parseRdmnetPacket(socket.writes[0]);
+        const connectReqRoot = parseWrite(socket.writes[0]);
         const connectReq = decodeBrokerMessage(connectReqRoot.data);
         expect(connectReq.vector).toBe(BrokerVector.Connect);
         if (connectReq.vector !== BrokerVector.Connect) throw new Error('Expected connect');
         expect(connectReq.clientEntry.uid).toEqual(uid);
 
         const brokerUid = {manufacturerId: 0x0001, deviceId: 0x00000001};
-        socket.emit('data', buildRdmnetPacket({
+        socket.emit('data', buildRdmnetTcpPacket({
             vector: RdmnetRootVector.Broker,
             data: encodeBrokerMessage({
                 vector: BrokerVector.ConnectReply,
@@ -619,7 +732,7 @@ describe('RdmnetClient', () => {
         const sessionStart = client.startBrokerSession({scope: 'invalid'});
         await Promise.resolve();
 
-        socket.emit('data', buildRdmnetPacket({
+        socket.emit('data', buildRdmnetTcpPacket({
             vector: RdmnetRootVector.Broker,
             data: encodeBrokerMessage({
                 vector: BrokerVector.ConnectReply,
@@ -647,7 +760,7 @@ describe('RdmnetClient', () => {
 
         const sessionStart = client.startBrokerSession();
         await Promise.resolve();
-        socket.emit('data', buildRdmnetPacket({
+        socket.emit('data', buildRdmnetTcpPacket({
             vector: RdmnetRootVector.Broker,
             data: encodeBrokerMessage({
                 vector: BrokerVector.ConnectReply,
@@ -660,7 +773,7 @@ describe('RdmnetClient', () => {
         await sessionStart;
 
         await client.stopBrokerSession(DisconnectReason.Shutdown);
-        const disconnectRoot = parseRdmnetPacket(socket.writes[socket.writes.length - 1]);
+        const disconnectRoot = parseWrite(socket.writes[socket.writes.length - 1]);
         const disconnect = decodeBrokerMessage(disconnectRoot.data);
         expect(disconnect.vector).toBe(BrokerVector.Disconnect);
         expect(client.getBrokerSessionState()).toBe(BrokerSessionState.TcpConnected);
@@ -675,18 +788,18 @@ describe('RdmnetClient', () => {
 
         await client.sendEptMessage({
             vector: EptVector.Data,
-            sequence: 1,
+            destinationCid: EPT_DEST_CID,
             manufacturerId: 0x7a70,
             protocolId: 1,
             payload: Buffer.from([9, 8, 7]),
         });
-        const outbound = parseRdmnetPacket(socket.writes[0]);
+        const outbound = parseWrite(socket.writes[0]);
         expect(outbound.vector).toBe(RdmnetRootVector.Ept);
 
         const inboundPromise = new Promise((resolve) => client.once('eptMessage', resolve));
-        socket.emit('data', buildRdmnetPacket({
+        socket.emit('data', buildRdmnetTcpPacket({
             vector: RdmnetRootVector.Ept,
-            data: encodeEptMessage({vector: EptVector.Status, sequence: 2, statusCode: 100, text: 'ack'}),
+            data: encodeEptMessage({vector: EptVector.Status, destinationCid: EPT_DEST_CID, statusCode: 100, text: 'ack'}),
         }));
         await expect(inboundPromise).resolves.toMatchObject({vector: EptVector.Status});
     });
@@ -711,10 +824,10 @@ describe('RdmnetClient', () => {
 
         const listPromise = client.requestClientList(1000);
         await Promise.resolve();
-        const reqRoot = parseRdmnetPacket(socket.writes[0]);
+        const reqRoot = parseWrite(socket.writes[0]);
         expect(decodeBrokerMessage(reqRoot.data).vector).toBe(BrokerVector.FetchClientList);
 
-        socket.emit('data', buildRdmnetPacket({
+        socket.emit('data', buildRdmnetTcpPacket({
             vector: RdmnetRootVector.Broker,
             data: encodeBrokerMessage({vector: BrokerVector.ConnectedClientList, clients: [otherEntry]}),
         }));
@@ -740,13 +853,13 @@ describe('RdmnetClient', () => {
             bindingCid: Buffer.alloc(16),
         };
 
-        socket.emit('data', buildRdmnetPacket({
+        socket.emit('data', buildRdmnetTcpPacket({
             vector: RdmnetRootVector.Broker,
             data: encodeBrokerMessage({vector: BrokerVector.ClientAdd, clients: [entry]}),
         }));
         expect(client.listKnownClients()).toEqual([entry]);
 
-        socket.emit('data', buildRdmnetPacket({
+        socket.emit('data', buildRdmnetTcpPacket({
             vector: RdmnetRootVector.Broker,
             data: encodeBrokerMessage({vector: BrokerVector.ClientRemove, clients: [entry]}),
         }));
@@ -777,7 +890,7 @@ describe('RdmnetClient', () => {
         });
 
         await client.sendRptStatus(reply, RptStatusCode.UnknownRdmUid, 'nope');
-        const sentStatus = decodeRptMessage(parseRdmnetPacket(socket.writes[socket.writes.length - 1]).data);
+        const sentStatus = decodeRptMessage(parseWrite(socket.writes[socket.writes.length - 1]).data);
         expect(sentStatus.vector).toBe(RptVector.Status);
 
         await client.sendRdmNotification(reply, [{
@@ -791,7 +904,7 @@ describe('RdmnetClient', () => {
             pid: 0x0060,
             parameterData: Buffer.alloc(0),
         }]);
-        const sentNotification = decodeRptMessage(parseRdmnetPacket(socket.writes[socket.writes.length - 1]).data);
+        const sentNotification = decodeRptMessage(parseWrite(socket.writes[socket.writes.length - 1]).data);
         expect(sentNotification.vector).toBe(RptVector.Notification);
     });
 
@@ -803,7 +916,7 @@ describe('RdmnetClient', () => {
         await connectPromise;
 
         const errorPromise = new Promise((resolve) => client.once('error', resolve));
-        socket.emit('data', buildRdmnetPacket({vector: RdmnetRootVector.Rpt, data: Buffer.alloc(0)}));
+        socket.emit('data', buildRdmnetTcpPacket({vector: RdmnetRootVector.Rpt, data: Buffer.alloc(0)}));
         const err = await errorPromise;
         expect(err).toBeInstanceOf(RdmnetError);
         expect(err).toMatchObject({domain: 'rpt', code: 'RPT_DECODE_ERROR'});
@@ -841,7 +954,7 @@ describe('RdmnetClient', () => {
             destEndpointId: 0,
             sequenceNumber: 7,
         };
-        socket.emit('data', buildRdmnetPacket({
+        socket.emit('data', buildRdmnetTcpPacket({
             vector: RdmnetRootVector.Rpt,
             data: encodeRptMessage({
                 vector: RptVector.Request,
@@ -860,7 +973,7 @@ describe('RdmnetClient', () => {
 
         await new Promise((resolve) => setTimeout(resolve, 0));
         expect(socket.writes.length).toBe(1);
-        const sent = decodeRptMessage(parseRdmnetPacket(socket.writes[0]).data);
+        const sent = decodeRptMessage(parseWrite(socket.writes[0]).data);
         expect(sent.vector).toBe(RptVector.Notification);
         if (sent.vector !== RptVector.Notification) throw new Error('expected notification');
         expect(sent.header).toEqual({

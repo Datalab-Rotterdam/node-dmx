@@ -18,6 +18,7 @@ export type RdmnetErrorCode =
     | 'EPT_DECODE_ERROR'
     | 'LLRP_DECODE_ERROR'
     | 'RESPONSE_TIMEOUT'
+    | 'HEARTBEAT_TIMEOUT'
     | 'PROTOCOL_ERROR';
 
 export class RdmnetError extends Error {

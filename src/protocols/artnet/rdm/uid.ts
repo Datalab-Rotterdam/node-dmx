@@ -48,17 +48,25 @@ export function uidToString(uid: UID): string {
     return `${manu}:${dev}`;
 }
 
-/** Parse UID string formatted as `mmmm:dddddddd`. */
+const UID_STRING_PATTERN = /^([0-9a-fA-F]{1,4}):([0-9a-fA-F]{1,8})$/;
+
+/**
+ * Parse UID string formatted as `mmmm:dddddddd` (hex, case-insensitive).
+ * The manufacturer part must be 1-4 hex digits (0x0000-0xFFFF) and the device
+ * part 1-8 hex digits (0x00000000-0xFFFFFFFF); anything else (signs, `0x`
+ * prefixes, whitespace, trailing junk such as `12zz`) is rejected.
+ */
 export function uidFromString(text: string): UID {
     const parts = text.split(':');
     if (parts.length !== 2) {
         throw new Error('UID must be formatted as "mmmm:dddddddd"');
     }
-    const manufacturerId = parseInt(parts[0], 16);
-    const deviceId = parseInt(parts[1], 16);
-    if (!Number.isInteger(manufacturerId) || !Number.isInteger(deviceId)) {
+    const match = UID_STRING_PATTERN.exec(text);
+    if (!match) {
         throw new Error('UID contains invalid hex values');
     }
+    const manufacturerId = parseInt(match[1]!, 16);
+    const deviceId = parseInt(match[2]!, 16);
     return {manufacturerId, deviceId};
 }
 

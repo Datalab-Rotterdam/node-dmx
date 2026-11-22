@@ -1,54 +1,66 @@
 # node-dmx 🎛️
 
-`node-dmx` is a TypeScript library for controlling DMX over IP from Node.js.
+[![npm version](https://img.shields.io/npm/v/node-dmx.svg)](https://www.npmjs.com/package/node-dmx)
+[![npm downloads](https://img.shields.io/npm/dm/node-dmx.svg)](https://www.npmjs.com/package/node-dmx)
+[![CI](https://github.com/Datalab-Rotterdam/node-dmx/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/Datalab-Rotterdam/node-dmx/actions/workflows/ci.yml)
+[![codecov](https://codecov.io/gh/Datalab-Rotterdam/node-dmx/branch/main/graph/badge.svg)](https://codecov.io/gh/Datalab-Rotterdam/node-dmx)
+[![node](https://img.shields.io/node/v/node-dmx.svg)](https://nodejs.org)
+[![types](https://img.shields.io/npm/types/node-dmx.svg)](https://www.npmjs.com/package/node-dmx)
+[![license](https://img.shields.io/npm/l/node-dmx.svg)](LICENSE)
+[![docs](https://img.shields.io/badge/docs-API%20reference-blue.svg)](https://datalab-rotterdam.github.io/node-dmx/)
 
-It supports:
-- sACN (E1.31)
-- Art-Net 4
-- RDM over Art-Net
-- RDMnet (ANSI E1.33: root layer + Broker session + RPT RDM transactions + real LLRP UDP discovery)
-- A fixture plugin system
+Control DMX lighting over your network from Node.js. Written in TypeScript and
+has no runtime dependencies.
 
-## RDMnet Compliance Status
-- Root layer (`rdmnet/packet`), Broker PDU (`rdmnet/broker`), and RPT PDU (`rdmnet/rpt`) are wire-format-correct per ANSI E1.33, verified byte-for-byte against ETCLabs' open-source E1.33 reference implementation (root-layer extended flags+length, Broker Connect/Connect Reply/Client Entry/Client List/Disconnect/Null, RPT header + Request/Notification/Status PDUs including the RDM Command PDU's leading-0xCC encoding).
-- LLRP (`rdmnet/llrp-transport`: `LlrpManager`, `LlrpTarget`) implements the real ANSI E1.33 §6 UDP multicast transport — two multicast groups (request/response), the 27-byte LLRP PDU header, Probe Request/Reply, RDM command passthrough, and the reference discovery algorithm (ranged probing with a known-UID exclusion list, gated by consecutive clean rounds). It is intentionally not carried over `RdmnetClient`'s TCP connection, matching the spec's requirement that LLRP work without a live Broker session.
-- Not implemented: EPT client entries/messages beyond basic pass-through, Dynamic UID assignment, and Redirect V6. These are lower-traffic corners of E1.33 that most controllers/devices don't exercise.
-- Not claimed: formal/full E1.33 compliance certification — that requires running the ANSI/ESTA conformance test suite against real third-party brokers/controllers/devices in your target environment, which is outside what a library alone can certify.
+- **sACN (E1.31)**: send, receive and merge multiple sources, sync, universe discovery
+- **Art-Net 4**: send, receive, node discovery, ArtSync
+- **RDM (E1.20)**: configure and query fixtures over Art-Net
+- **RDMnet (E1.33)**: Broker client, RDM over RPT, LLRP discovery, TLS
+- **Fixture simulation**: make your app behave like an RDM-capable fixture
+- **Fixture plugins**: set fixtures with values like `{dimmer: 1, rgb: [1, 0, 0]}` instead of raw channels
 
-## Feature Support Matrix
-| Area              | Feature                          | sACN (E1.31)            | Art-Net 4                 | RDMnet (E1.33)          | Notes                                                                                          |
-|-------------------|----------------------------------|--------------------------|---------------------------|--------------------------|-------------------------------------------------------------------------------------------------|
-| Core I/O          | DMX Send                         | ✅                      | ✅                        | ❌                      | `DMXController` sends DMX via sACN/Art-Net                                                      |
-| Core I/O          | DMX Receive / Listen             | ✅                      | ✅                        | ❌                      | `Receiver`, `ArtNetReceiver` — RDMnet carries RDM device management, not DMX slot data          |
-| Core I/O          | Synchronization / Discovery      | ✅                      | ✅ (ArtSync)              | n/a                      | `Sender.sendSync`, `UniverseDiscoverySource` (E1.31 §6/§8)                                      |
-| Device Discovery  | Controller/Node Discovery        | ⚠️ Discovery packets    | ✅                        | ✅                       | `ArtNetDiscovery`, `RdmnetDiscovery` (DNS-SD + mDNS), `LlrpManager`                              |
-| Device Management | RDM Messaging (controller)       | ❌                      | ✅                        | ✅                       | `ArtNetRdmClient` full flow, `RdmnetClient` RPT `rdmTransaction`, `LlrpManager` RDM passthrough  |
-| Device Management | RDM Responder (fixture/device)   | n/a                      | ✅                        | ✅                       | `RdmResponder` core + `ArtNetRdmResponder` / `RdmnetClient.useRdmResponder` / `LlrpTarget`        |
-| Security          | Secure Transport                 | ❌                      | ❌                        | ✅                       | `RdmnetClient` supports `transport: 'tls'`, peer auth policy, post-connect auth hook            |
-| Ecosystem         | Fixture Plugin System            | ✅                      | ✅                        | ❌                       | Fixture API currently targets DMX output protocols                                              |
-| Compliance        | Formal Protocol Compliance Claim | ✅ E1.31 implementation | ✅ Art-Net implementation | ⚠️ Wire-format verified | RDMnet: root/Broker/RPT/LLRP wire-verified; full claim depends on third-party conformance runs  |
+📚 **[API reference](https://datalab-rotterdam.github.io/node-dmx/)** · 🐛 **[Report a bug](https://github.com/Datalab-Rotterdam/node-dmx/issues/new/choose)** · 🛠️ **[Contributing](CONTRIBUTING.md)**
 
-This guide is written for students and first-time users: start simple, then move to advanced features.
-
-## Requirements
-- Node.js 20+
-- A DMX-over-IP device (sACN or Art-Net)
-- Computer and lighting device on the same network
+## Contents
+- [Install](#install)
+- [DMX in 30 seconds](#dmx-in-30-seconds)
+- [Quick start](#quick-start)
+- [Guides](#guides)
+  - [Multiple universes](#multiple-universes)
+  - [Art-Net universe numbering](#art-net-universe-numbering)
+  - [Receiving sACN](#receiving-sacn)
+  - [Receiving Art-Net](#receiving-art-net)
+  - [Finding Art-Net nodes](#finding-art-net-nodes)
+  - [RDM over Art-Net](#rdm-over-art-net)
+  - [Simulating a fixture](#simulating-a-fixture)
+  - [Fixtures](#fixtures)
+- [Controller options](#controller-options)
+- [Protocol support](#protocol-support)
+- [Examples](#examples)
+- [Troubleshooting](#troubleshooting)
+- [License](#license)
 
 ## Install
 ```bash
 npm install node-dmx
 ```
 
-## DMX Basics (Quick)
-- A **universe** has 512 channels.
-- A **channel value** is 0-255.
-- You set values in memory, then call `flush()` to send them.
-- The controller re-sends every flushed universe about once a second
-  (`keepAliveMs`, default `1000`), because sACN receivers drop a source after
-  2.5 s of silence. Call `close()` when done to stop it.
+You need Node.js 20 or newer, plus a lighting device or node that speaks sACN or
+Art-Net on the same network as your computer. The package ships both ESM and
+CommonJS builds with type definitions.
 
-## 1. Quick Start (sACN)
+## DMX in 30 seconds
+- A **universe** is 512 channels. A **channel value** is 0–255.
+- A fixture uses a few consecutive channels from its **start address** (for
+  example red, green, blue on channels 1–3).
+- With node-dmx you change values in memory, then call `flush()` to send them.
+- The controller resends each universe about once a second, even if nothing
+  changed. Receivers drop a silent source after 2.5 s, so this keeps your
+  lights on. Call `close()` when you're done.
+
+## Quick start
+
+### sACN
 ```ts
 import {DMXController} from 'node-dmx';
 
@@ -56,82 +68,115 @@ const controller = new DMXController({protocol: 'sacn'});
 const universe = controller.addUniverse(1);
 
 universe.setChannel(1, 255); // channel 1 at full
-
 await controller.flush();
+
+// ...later
 controller.close();
 ```
 
-## 2. Quick Start (Art-Net)
+If your computer has more than one network interface, pick one with
+`iface: '192.168.1.50'` (the IPv4 address of your own network card).
+
+### Art-Net
 ```ts
 import {DMXController} from 'node-dmx';
 
-const controller = new DMXController({
-  protocol: 'artnet',
-  artSync: true,
-  artnet: {
-    host: '255.255.255.255',
-    broadcast: true,
-  },
-});
+const controller = new DMXController({protocol: 'artnet', artSync: true});
 
 controller.setChannel(1, 1, 255); // universe 1, channel 1, full
 await controller.flush();
 controller.close();
 ```
 
-## 3. Working With Multiple Universes
-```ts
-import {DMXController} from 'node-dmx';
+By default Art-Net uses your subnet's broadcast address. To send to one node
+instead, set `unicastDestination: '192.168.1.20'`.
 
+## Guides
+
+### Multiple universes
+```ts
 const controller = new DMXController({protocol: 'sacn'});
 const u1 = controller.addUniverse(1);
 const u2 = controller.addUniverse(2);
 
 u1.setChannel(1, 255);
-u2.setChannel(1, 128);
+u2.fill(128);          // all 512 channels at half
+u2.setFrame(new Uint8Array([255, 0, 0])); // replace whole frame, rest becomes 0
 
-await controller.flush(); // sends all dirty universes
+await controller.flush(); // sends every changed universe at once
 ```
 
+To make several universes change on the exact same frame, use sACN sync:
+`new DMXController({protocol: 'sacn', sacnSyncUniverse: 7999})`. Receivers then
+hold each frame until a sync packet arrives after `flush()`.
+
 ### Art-Net universe numbering
-By default Art-Net universes are **1-based** (universe `1` = Port-Address `0`),
-matching sACN. Most Art-Net consoles and nodes show the raw 0-based
-Port-Address instead; opt in with `artnetPortAddressing`:
+By default, Art-Net universes start at **1**, like sACN (universe `1` is
+Port-Address `0`). Most Art-Net consoles and nodes show the raw Port-Address,
+which starts at **0**. To use that numbering, turn on `artnetPortAddressing`:
 
 ```ts
 const controller = new DMXController({protocol: 'artnet', artnetPortAddressing: true});
 controller.setChannel(0, 1, 255); // Port-Address 0 (Net 0, Sub-Net 0, Universe 0)
 ```
 
-`ArtNetSender` accepts `portAddress` directly, and received ArtDMX packets
-carry both `universe` (1-based) and `portAddress` (0-based).
+### Receiving sACN
+```ts
+import {Receiver, Merger} from 'node-dmx';
 
-## 4. Device Discovery (Art-Net)
+const receiver = new Receiver({universes: [1, 2]});
+
+receiver.on('packet', (packet) => {
+  console.log(packet.universe, packet.sourceName, packet.payloadAsBuffer?.[0]);
+});
+receiver.on('sourceLost', (source) => console.log('lost', source.sourceName, source.reason));
+```
+
+With several consoles on one universe, a `Merger` combines them into one frame.
+The highest priority wins, and sources with equal priority are merged
+highest-takes-precedence (HTP):
+
+```ts
+const merger = new Merger(receiver);
+merger.on('merged', ({universe, data}) => console.log(universe, data[0]));
+```
+
+Bad network packets never crash your process. They are reported as
+`PacketCorruption` events, which you can ignore.
+
+### Receiving Art-Net
+```ts
+import {ArtNetReceiver} from 'node-dmx';
+
+const receiver = new ArtNetReceiver({universes: [1]});
+receiver.on('dmx', (msg) => console.log(msg.universe, msg.portAddress, msg.data[0]));
+```
+
+### Finding Art-Net nodes
 ```ts
 import {ArtNetDiscovery} from 'node-dmx';
 
-// Listens on UDP 6454 (where nodes send ArtPollReply). Pass `bindAddress`
-// to poll that interface's directed broadcast address.
 const discovery = new ArtNetDiscovery({bindAddress: '192.168.1.50'});
-const replies = await discovery.pollOnce();
+const nodes = await discovery.pollOnce();
 
-for (const node of replies) {
+for (const node of nodes) {
   console.log(node.ip, node.shortName, node.longName);
 }
-
 discovery.close();
 ```
 
-## 5. RDM Over Art-Net
+### RDM over Art-Net
+RDM lets you query and configure fixtures: read their info, change the DMX
+start address, or make them identify themselves.
+
 ```ts
 import {ArtNetRdmClient, RdmCommandClass, PIDS} from 'node-dmx';
 
-const client = new ArtNetRdmClient({host: '192.168.0.10'});
+const client = new ArtNetRdmClient({host: '192.168.1.20'});
 
 const response = await client.rdmTransaction(1, {
   destinationUid: {manufacturerId: 0x7a70, deviceId: 0x00000001},
   sourceUid: {manufacturerId: 0x7a70, deviceId: 0x00000002},
-  // transactionNumber is optional: the client auto-increments it (0-255, wrapping)
   portId: 1,
   subDevice: 0,
   commandClass: RdmCommandClass.GET_COMMAND,
@@ -142,196 +187,121 @@ console.log(response); // null on timeout
 client.close();
 ```
 
-Replies are matched to requests by transaction number, UIDs and command
-class, so concurrent requests are safe. Art-Net nodes send `OpRdm`/`ArtTodData`
-to UDP **6454**, so the client binds that port by default (`localPort`, with
-`reuseAddr: true`) and falls back to a random port if it's taken. On Windows,
-sharing 6454 with another socket in the same process (e.g. an `ArtNetReceiver`)
-can cause one of them to miss unicast replies; give each its own interface or
-use `localPort: 0` if your nodes reply to the source port.
+You can send requests at the same time; each reply goes back to the request it
+belongs to. The client listens on UDP port 6454, where Art-Net nodes send their
+replies.
 
-## 6. Simulate a Fixture (RDM Responder)
-`RdmResponder` is a transport-agnostic RDM *device* core — it answers GET/SET for the
-standard PID set (DEVICE_INFO, DMX_START_ADDRESS, IDENTIFY_DEVICE, DEVICE_LABEL,
-DMX_PERSONALITY, MANUFACTURER_LABEL, SUPPORTED_PARAMETERS, DISC_MUTE/UN_MUTE...) for you —
-no manual ACK/NACK frame or checksum handling. Three wrappers plug it into each transport:
+### Simulating a fixture
+`RdmResponder` makes your app act like an RDM fixture. It answers the standard
+requests (device info, start address, identify, label, personality, and more)
+for you.
 
 ```ts
 import {ArtNetRdmResponder, RdmResponder} from 'node-dmx';
 
-const uid = {manufacturerId: 0x7a70, deviceId: 0x00000042};
 const responder = new RdmResponder({
-  uid,
+  uid: {manufacturerId: 0x7a70, deviceId: 0x00000042},
   deviceLabel: 'Sim Fixture 1',
   dmxStartAddress: 1,
   personalities: [{footprint: 3, description: 'RGB'}],
   onIdentifyChange: (on) => console.log('identify', on),
 });
 
-// Art-Net: answers ArtPoll/ArtTodRequest/ArtRdm; discoverable via ArtNetDiscovery.
 const fixture = new ArtNetRdmResponder({responder, universe: 1});
 fixture.on('dmx', (frame) => console.log('levels', frame.subarray(0, 3)));
 ```
 
-- **Art-Net**: `ArtNetRdmResponder` (also receives ArtDMX for the configured universe).
-- **RDMnet**: `RdmnetClient.useRdmResponder(responder)` — auto-answers inbound RPT Requests.
-- **LLRP**: `new LlrpTarget({..., onRdmCommand: (frame) => responder.respond(frame)})`.
+The same responder also works over RDMnet (`RdmnetClient.useRdmResponder(responder)`)
+and LLRP (`new LlrpTarget({..., onRdmCommand: (frame) => responder.respond(frame)})`).
 
-See `examples/artnet-fixture-simulator.ts`, `examples/rdmnet-fixture-simulator.ts`, and
-`examples/rdmnet-llrp-fixture-simulator.ts`.
+### Fixtures
+Fixture plugins let you set a fixture with values like colours and dimmer
+levels from 0 to 1 instead of raw channel bytes.
 
-## 7. Fixtures (Higher-Level API)
 ```ts
 import {DMXController, Fixture, RGBDimmerFixture} from 'node-dmx';
 
 const controller = new DMXController({protocol: 'sacn'});
-controller.addUniverse(1);
 
-const fixture = new Fixture(
-  controller,
-  RGBDimmerFixture,
-  1,     // universe
-  1,     // start address
-  '4ch', // personality id
-);
+const fixture = new Fixture(controller, RGBDimmerFixture, 1 /* universe */, 1 /* address */, '4ch');
 
-// RGBDimmerFixture expects state with `dimmer` and `rgb` array values in range 0..1
 fixture.set({dimmer: 1, rgb: [1, 0.25, 0.1]});
 fixture.render();
-
 await controller.flush();
 ```
 
-Available built-in example fixture plugins:
-- `RGBDimmerFixture` (`4ch`: dimmer + RGB)
-- `RGBWW5Fixture` (`5ch`: R + G + B + warm white + cool white)
+Built-in example plugins:
+- `RGBDimmerFixture` (`4ch`: dimmer, R, G, B)
+- `RGBWW5Fixture` (`5ch`: R, G, B, warm white, cool white)
 
-## 8. Runnable Examples
-All examples live in `examples/`.
+To support your own fixtures, implement `FixtureModelPlugin<State>` (see
+`src/fixtures/vendors/example` for reference).
 
-Core examples:
-- `examples/sacn-basic.ts`
-- `examples/sacn-animate.ts`
-- `examples/sacn-animate-orignal.ts` (older single-universe variant)
-- `examples/sacn-rainbow.ts`
-- `examples/sacn-sync.ts` — Synchronization Packets (E1.31 §6)
-- `examples/sacn-universe-discovery.ts` — Universe Discovery (E1.31 §8)
-- `examples/sacn-listen-matrix.ts`
-- `examples/artnet-animate.ts`
-- `examples/artnet-listen-matrix.ts`
-- `examples/artnet-discover.ts`
-- `examples/artnet-fixture-simulator.ts` — simulate a DMX+RDM fixture
-- `examples/rdm-tod.ts`
-- `examples/rdmnet-listen.ts`
-- `examples/rdmnet-discover.ts`
-- `examples/rdmnet-interop-smoke.ts`
-- `examples/rdmnet-rdm-transaction.ts` — RDM GET over RPT
-- `examples/rdmnet-llrp-discover.ts` — real LLRP UDP device discovery
-- `examples/rdmnet-fixture-simulator.ts` — simulate an RDMnet RDM device
-- `examples/rdmnet-llrp-fixture-simulator.ts` — simulate an LLRP Target
-- `examples/fixture-rgbww5.ts`
-- `examples/list-network-interfaces.ts`
+## Controller options
+`new DMXController(options)` accepts:
 
-Additional animation examples:
-- `examples/sacn-comet-chase.ts`
-- `examples/sacn-fire-flicker.ts`
-- `examples/sacn-police-strobe.ts`
-- `examples/sacn-breathing-pastels.ts`
-- `examples/sacn-color-wipe.ts`
-- `examples/sacn-sparkle.ts`
-- `examples/sacn-theater-chase.ts`
-- `examples/sacn-aurora.ts`
-- `examples/sacn-pulse-stack.ts`
-- `examples/sacn-storm.ts`
-- `examples/sacn-halloween.ts`
-- `examples/sacn-christmas.ts`
+| Option                 | Default        | Description                                                                 |
+|------------------------|----------------|-----------------------------------------------------------------------------|
+| `protocol`             | `'sacn'`       | `'sacn'` or `'artnet'`                                                      |
+| `iface`                | OS default     | IPv4 address of the network interface to send from                          |
+| `unicastDestination`   | –              | Send to this IP instead of multicast (sACN) or broadcast (Art-Net)          |
+| `keepAliveMs`          | `1000`         | How often unchanged universes are resent; `0` turns this off                |
+| `artSync`              | `false`        | Art-Net: send ArtSync after each flush                                      |
+| `sacnSyncUniverse`     | –              | sACN: synchronization universe; receivers hold frames until the sync packet |
+| `artnetPortAddressing` | `false`        | Art-Net: universe ids are 0-based Port-Addresses                            |
+| `defaultPacketOptions` | –              | sACN: `sourceName`, `priority`, `cid` for every packet                      |
+| `sacn` / `artnet`      | –              | Protocol-specific sender settings                                           |
+| `senderFactory`        | –              | Provide your own sender (useful for tests)                                  |
 
-Run an example:
+Background send errors are emitted as `controller.on('error', ...)`.
+
+## Protocol support
+
+| Feature                        | sACN (E1.31)       | Art-Net 4   | RDMnet (E1.33)       |
+|--------------------------------|--------------------|-------------|----------------------|
+| Send DMX                       | ✅                 | ✅          | n/a                  |
+| Receive DMX                    | ✅ (with merging)  | ✅          | n/a                  |
+| Synchronization                | ✅                 | ✅ ArtSync  | n/a                  |
+| Device / node discovery        | ✅ Universe discovery | ✅ ArtPoll | ✅ DNS-SD + LLRP    |
+| RDM controller                 | –                  | ✅          | ✅                   |
+| RDM responder (simulate fixture) | –                | ✅          | ✅                   |
+| Secure transport (TLS)         | –                  | –           | ✅                   |
+
+RDMnet's wire format is checked against the ETC open-source E1.33 reference
+implementation, but node-dmx has not been certified with the ESTA conformance
+suite. EPT beyond basic pass-through, dynamic UID assignment and Redirect V6
+are not implemented.
+
+## Examples
+The [`examples/`](https://github.com/Datalab-Rotterdam/node-dmx/tree/main/examples) folder has runnable scripts for every feature:
+animations (rainbow, comet chase, fire, storm…), listeners, discovery, RDM, and
+fixture simulators. To run one, clone the repository and run:
+
 ```bash
+npm install
 npm run example/sacn-rainbow
+DMX_IFACE=192.168.1.50 npm run example/sacn-rainbow   # choose an interface
 ```
 
-All `sacn-*` examples read `DMX_IFACE` to override the hardcoded interface IP:
-```bash
-DMX_IFACE=192.168.1.50 npm run example/sacn-rainbow
-```
-
-## 9. Common Options
-Useful options for `DMXController`:
-- `protocol`: `'sacn' | 'artnet'`
-- `iface`: local interface IPv4 address
-- `reuseAddr`: allow multiple listeners/senders on same UDP port
-- `unicastDestination`: send unicast instead of multicast/broadcast
-- `artSync`: send ArtSync after flush (Art-Net)
-- `sacnSyncUniverse`: E1.31 synchronization address; receivers hold frames until the sync packet sent after each flush
-- `keepAliveMs`: resend interval for unchanged universes (default `1000`, `0` disables)
-- `artnetPortAddressing`: use raw 0-based Art-Net Port-Addresses as universe ids
-
-Receiving sACN from several sources:
-```ts
-import {Receiver, Merger} from 'node-dmx';
-
-const receiver = new Receiver({universes: [1]});
-const merger = new Merger(receiver); // highest priority wins, HTP between equal priorities
-merger.on('merged', ({universe, data}) => console.log(universe, data[0]));
-receiver.on('sourceLost', (s) => console.log('lost', s.sourceName, s.reason));
-```
-The receiver applies the E1.31 sequence rules, reports sources that time out
-(2.5 s) or send Stream_Terminated via `sourceLost`, and emits non-zero START
-Code frames (e.g. `0xDD` priority) as `alternateStartCode` instead of `packet`.
-Malformed network input never raises `error` (sACN: `PacketCorruption`,
-Art-Net: `invalidPacket`), so a bad packet can't crash your process.
-
-RDMnet client options:
-- `uid`: **required** — this component's RDM UID (`{manufacturerId, deviceId}`), carried in the Broker Client Entry and every RPT header
-- `transport`: `'tcp' | 'tls'` (default `tcp`)
-- `tls`: Node TLS options (CA, client cert/key, ciphers, min/max version, etc.)
-- `requireTlsAuthorization`: reject unauthorized TLS peers (default `true` when `transport: 'tls'`)
-- `postConnectAuth`: async hook for environment-specific auth/profile checks
-
-## 10. RDMnet Interoperability/Conformance
-Use real brokers/devices for compliance verification (not mocks only).
-
-Smoke-runner against a real broker:
-```bash
-RDMNET_INTEROP_HOST=192.168.1.50 \
-RDMNET_INTEROP_PORT=5568 \
-npm run example/rdmnet-interop-smoke
-```
-
-Environment-gated integration test:
-```bash
-RDMNET_INTEROP_HOST=192.168.1.50 \
-RDMNET_INTEROP_PORT=5568 \
-RDMNET_INTEROP_SCOPE=default \
-npm run test:interop:rdmnet
-```
-
-Useful flags:
-- `RDMNET_INTEROP_TLS=1`: use TLS transport
-- `RDMNET_INTEROP_TLS_STRICT=0`: allow non-authorized TLS peer for lab setups
-- `RDMNET_INTEROP_CHECK_LISTS=1`: also validate the broker client-list request
-- `RDMNET_INTEROP_TIMEOUT_MS=5000`: per-request timeout override
-
-## 11. TypeDoc
-TypeDoc output uses `README.md` as the landing page.
-
-Build docs:
-```bash
-npm run docs:build
-```
-
-Output:
-- `generated/docs`
+`npm run example/list-network-interfaces` shows the interface addresses on
+your machine.
 
 ## Troubleshooting
-- Verify your interface IP (`iface`) is on the same subnet as the fixture.
-- If multicast does not work on your network, use unicast.
-- Try universe numbering differences (some devices start at 0, most at 1).
-- For Art-Net broadcast, ensure network allows UDP broadcasts.
+- **Nothing lights up**: check that `iface` is on the same subnet as the
+  device, and that the device listens to the same universe and protocol.
+- **Off by one universe**: some devices count from 0. For Art-Net, try
+  `artnetPortAddressing: true`.
+- **Multicast is blocked** (common on Wi-Fi and managed switches): use
+  `unicastDestination`.
+- **Art-Net replies are missing**: make sure UDP port 6454 is not taken by
+  other software and that your firewall allows UDP broadcasts.
+- **Lights drop out when idle**: keep `keepAliveMs` above `0`.
 
-## Protocol References
-- Art-Net 4: https://art-net.org.uk/downloads/art-net.pdf
-- ANSI E1.31 (sACN): https://tsp.esta.org/tsp/documents/published_docs.php
-- ANSI E1.20 (RDM): https://getdlight.com/media/kunena/attachments/42/ANSI_E1-20_2010.pdf
-- ANSI E1.33 (RDMnet): https://tsp.esta.org/tsp/documents/published_docs.php
+Still stuck? [Open an issue](https://github.com/Datalab-Rotterdam/node-dmx/issues/new/choose).
+
+## Protocol references
+- [Art-Net 4](https://art-net.org.uk/downloads/art-net.pdf)
+- [ANSI E1.31 (sACN), E1.20 (RDM), E1.33 (RDMnet)](https://tsp.esta.org/tsp/documents/published_docs.php)
+
+## License
+[Apache-2.0](LICENSE)

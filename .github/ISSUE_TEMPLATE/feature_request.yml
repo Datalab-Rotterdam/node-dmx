@@ -1,0 +1,59 @@
+name: Feature request
+description: Suggest a new feature or improvement for node-dmx
+title: "[Feature]: "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the idea! Please describe the problem you're trying to solve. That helps more than a finished design.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem or use case
+      description: What are you trying to do, and what makes it hard today?
+      placeholder: "I want to receive sACN from two consoles and only use the backup when the main one drops out..."
+    validations:
+      required: true
+
+  - type: textarea
+    id: solution
+    attributes:
+      label: Proposed solution
+      description: How would you like it to work? An API sketch is welcome.
+      render: ts
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives or workarounds
+      description: Anything you've tried or other libraries that handle this.
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      multiple: true
+      options:
+        - sACN (E1.31)
+        - Art-Net
+        - RDM
+        - RDMnet / LLRP
+        - Fixtures / plugins
+        - DMXController / core API
+        - Documentation / examples
+        - Other
+
+  - type: input
+    id: spec
+    attributes:
+      label: Spec reference
+      description: If this is part of a protocol standard, the document and section (e.g. "E1.31 §6.2.6").
+
+  - type: checkboxes
+    id: contribute
+    attributes:
+      label: Contribution
+      options:
+        - label: I'd like to open a pull request for this (see [CONTRIBUTING.md](https://github.com/Datalab-Rotterdam/node-dmx/blob/main/CONTRIBUTING.md)).

@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Documentation and API reference
+    url: https://datalab-rotterdam.github.io/node-dmx/
+    about: Usage guides and the full API reference.
+  - name: Contributing guide
+    url: https://github.com/Datalab-Rotterdam/node-dmx/blob/main/CONTRIBUTING.md
+    about: Development setup, testing and release process.

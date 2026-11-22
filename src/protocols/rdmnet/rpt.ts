@@ -51,9 +51,29 @@ export type RptRequestMessage = {
 export type RptNotificationMessage = {
     vector: RptVector.Notification;
     header: RptHeader;
+    /**
+     * The original RDM command this Notification answers. E1.33 requires a
+     * Notification sent in response to an RPT Request to carry the original
+     * command as its first RDM Command PDU, ahead of the response(s). When
+     * encoding, it is prepended on the wire; when decoding, a leading RDM
+     * command with a request command class (GET/SET/DISCOVERY) is split out
+     * into this field instead of appearing in {@link commands}.
+     */
+    originalCommand?: RdmRequest;
     /** One or more RDM responses, batched (e.g. multiple queued GET responses). */
     commands: RdmResponse[];
 };
+
+/** Request command classes (E1.20 DISCOVERY/GET/SET_COMMAND). */
+const REQUEST_COMMAND_CLASSES = new Set([0x10, 0x20, 0x30]);
+/** Response command classes (E1.20 DISCOVERY/GET/SET_COMMAND_RESPONSE). */
+const RESPONSE_COMMAND_CLASSES = new Set([0x11, 0x21, 0x31]);
+
+/** Returns `true` when `commandClass` is an RDM response class (0x11/0x21/0x31). */
+export const isRdmResponseCommandClass = (commandClass: number): boolean => RESPONSE_COMMAND_CLASSES.has(commandClass);
+
+/** Returns `true` when `commandClass` is an RDM request class (0x10/0x20/0x30). */
+export const isRdmRequestCommandClass = (commandClass: number): boolean => REQUEST_COMMAND_CLASSES.has(commandClass);
 
 export type RptStatusMessage = {
     vector: RptVector.Status;
@@ -118,11 +138,12 @@ function encodeRdmCommandPdu(rdmFrame: Buffer): Buffer {
 }
 
 /** Inverse of {@link encodeRdmCommandPdu}: reconstructs the full RDM frame (0xCC prepended). */
-function decodeRdmCommandPdu(buf: Buffer, offset: number): {rdmFrame: Buffer; length: number} {
-    if (offset + RDM_CMD_PDU_HEADER_LENGTH > buf.length) throw new RangeError('RDM Command PDU truncated');
+function decodeRdmCommandPdu(buf: Buffer, offset: number, end = buf.length): {rdmFrame: Buffer; length: number} {
+    if (offset + RDM_CMD_PDU_HEADER_LENGTH > end) throw new RangeError('RDM Command PDU truncated');
     const {flagsNibble, length} = readPduLength(buf, offset);
     assertPduFlags(flagsNibble, 'RDM Command PDU');
-    if (offset + length > buf.length) throw new RangeError('RDM Command PDU exceeds buffer');
+    if (length <= RDM_CMD_PDU_HEADER_LENGTH) throw new RangeError(`RDM Command PDU length ${length} too short`);
+    if (offset + length > end) throw new RangeError('RDM Command PDU exceeds enclosing PDU');
     const vector = buf.readUInt8(offset + 3);
     if (vector !== RDM_CMD_VECTOR) {
         throw new Error(`Unexpected RDM Command PDU vector 0x${vector.toString(16)} (expected 0xcc)`);
@@ -150,6 +171,9 @@ export const encodeRptMessage = (message: RptMessage): Buffer => {
                 throw new RangeError('RPT Notification must carry at least one RDM response');
             }
             const cmdPdus = message.commands.map((response) => encodeRdmCommandPdu(encodeRdmResponse(response)));
+            if (message.originalCommand) {
+                cmdPdus.unshift(encodeRdmCommandPdu(encodeRdmRequest(message.originalCommand)));
+            }
             const wrapperLength = WRAPPER_HEADER_LENGTH + cmdPdus.reduce((sum, b) => sum + b.length, 0);
             const totalLength = RPT_HEADER_LENGTH + wrapperLength;
             const buf = Buffer.alloc(totalLength);
@@ -183,14 +207,19 @@ export const encodeRptMessage = (message: RptMessage): Buffer => {
 export const decodeRptMessage = (buf: Buffer): RptMessage => {
     if (buf.length < RPT_HEADER_LENGTH) throw new RangeError('RPT PDU too short');
     const {vector, header, length} = readRptHeader(buf);
+    if (length < RPT_HEADER_LENGTH) throw new RangeError(`RPT PDU length ${length} too short`);
     if (length > buf.length) throw new RangeError('RPT PDU length exceeds buffer');
 
     switch (vector) {
         case RptVector.Request: {
             if (RPT_HEADER_LENGTH + WRAPPER_HEADER_LENGTH > length) throw new RangeError('RPT Request PDU too short');
-            const {flagsNibble} = readPduLength(buf, RPT_HEADER_LENGTH);
+            const {flagsNibble, length: wrapperLength} = readPduLength(buf, RPT_HEADER_LENGTH);
             assertPduFlags(flagsNibble, 'RPT Request wrapper');
-            const {rdmFrame} = decodeRdmCommandPdu(buf, RPT_HEADER_LENGTH + WRAPPER_HEADER_LENGTH);
+            const wrapperEnd = RPT_HEADER_LENGTH + wrapperLength;
+            if (wrapperLength < WRAPPER_HEADER_LENGTH || wrapperEnd > length) {
+                throw new RangeError(`RPT Request wrapper length ${wrapperLength} invalid`);
+            }
+            const {rdmFrame} = decodeRdmCommandPdu(buf, RPT_HEADER_LENGTH + WRAPPER_HEADER_LENGTH, wrapperEnd);
             return {vector, header, command: decodeRdmRequest(rdmFrame)};
         }
         case RptVector.Notification: {
@@ -200,15 +229,26 @@ export const decodeRptMessage = (buf: Buffer): RptMessage => {
             const {flagsNibble, length: wrapperLength} = readPduLength(buf, RPT_HEADER_LENGTH);
             assertPduFlags(flagsNibble, 'RPT Notification wrapper');
             const commands: RdmResponse[] = [];
+            let originalCommand: RdmRequest | undefined;
             let offset = RPT_HEADER_LENGTH + WRAPPER_HEADER_LENGTH;
             const wrapperEnd = RPT_HEADER_LENGTH + wrapperLength;
+            if (wrapperLength < WRAPPER_HEADER_LENGTH || wrapperEnd > length) {
+                throw new RangeError(`RPT Notification wrapper length ${wrapperLength} invalid`);
+            }
+            let first = true;
             while (offset < wrapperEnd) {
-                const {rdmFrame, length: cmdLength} = decodeRdmCommandPdu(buf, offset);
-                commands.push(decodeRdmResponse(rdmFrame));
+                const {rdmFrame, length: cmdLength} = decodeRdmCommandPdu(buf, offset, wrapperEnd);
+                // Command class sits at byte 20 of a full RDM frame (start code included).
+                if (first && rdmFrame.length > 20 && isRdmRequestCommandClass(rdmFrame[20]!)) {
+                    originalCommand = decodeRdmRequest(rdmFrame);
+                } else {
+                    commands.push(decodeRdmResponse(rdmFrame));
+                }
+                first = false;
                 offset += cmdLength;
             }
             if (commands.length === 0) throw new RangeError('RPT Notification carried no RDM responses');
-            return {vector, header, commands};
+            return originalCommand ? {vector, header, originalCommand, commands} : {vector, header, commands};
         }
         case RptVector.Status: {
             if (RPT_HEADER_LENGTH + STATUS_HEADER_LENGTH > length) throw new RangeError('RPT Status PDU too short');
@@ -216,6 +256,9 @@ export const decodeRptMessage = (buf: Buffer): RptMessage => {
             assertPduFlags(flagsNibble, 'RPT Status');
             const statusCode = buf.readUInt16BE(RPT_HEADER_LENGTH + 3) as RptStatusCode;
             const textEnd = RPT_HEADER_LENGTH + statusLength;
+            if (statusLength < STATUS_HEADER_LENGTH || textEnd > length) {
+                throw new RangeError(`RPT Status PDU length ${statusLength} invalid`);
+            }
             const text =
                 textEnd > RPT_HEADER_LENGTH + STATUS_HEADER_LENGTH
                     ? buf.toString('utf8', RPT_HEADER_LENGTH + STATUS_HEADER_LENGTH, textEnd)

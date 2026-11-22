@@ -7,11 +7,16 @@
  *   https://art-net.org.uk/downloads/art-net.pdf
  */
 import {ARTNET_ID, ARTNET_PORT, ARTNET_PROTOCOL_VERSION, DiagnosticsPriority, NodeStyle, OpCode} from './constants';
-import {readNullTerminatedString, splitUniverseAddress} from './util';
+import {type ArtNetAddress, readNullTerminatedString, splitPortAddress, splitUniverseAddress} from './util';
 
 export type ArtDmxOptions = {
-    /** 1-based universe number to send to. */
-    universe: number;
+    /**
+     * 1-based universe number to send to (universe 1 = Port-Address 0).
+     * Ignored when `portAddress` is given.
+     */
+    universe?: number;
+    /** Raw 15-bit Port-Address (0-32767). Takes precedence over `universe`. */
+    portAddress?: number;
     /** Art-Net sequence byte (0-255). */
     sequence: number;
     /** Physical output port number on controller, if used. */
@@ -29,7 +34,10 @@ export type ArtDmxPacket = {
     physical: number;
     net: number;
     subNet: number;
+    /** 1-based universe number (`portAddress + 1`). */
     universe: number;
+    /** Raw 15-bit Port-Address (0-32767). */
+    portAddress: number;
     length: number;
     data: Buffer;
 };
@@ -125,17 +133,26 @@ export const buildArtPoll = (options: ArtPollOptions = {}): Buffer => {
  * @param options DMX payload and addressing fields.
  */
 export const buildArtDmx = (options: ArtDmxOptions): Buffer => {
-    const length = Math.min(options.length ?? options.data.length, 512);
+    const requested = Math.max(2, Math.min(options.length ?? options.data.length, 512));
+    // Art-Net 4: ArtDmx Length must be an even number in the range 2-512.
+    const length = requested + (requested % 2);
     const buffer = Buffer.alloc(18 + length);
     writeHeader(buffer, OpCode.OpDmx);
     buffer.writeUInt8(options.sequence & 0xff, 12);
     buffer.writeUInt8(options.physical ?? 0, 13);
-    const addr = splitUniverseAddress(options.universe);
+    const addr = resolveAddress(options);
     buffer.writeUInt8(addr.subUni, 14);
     buffer.writeUInt8(addr.net, 15);
     buffer.writeUInt16BE(length, 16);
-    Buffer.from(options.data).copy(buffer, 18, 0, length);
+    Buffer.from(options.data).copy(buffer, 18, 0, Math.min(length, options.data.length));
     return buffer;
+};
+
+/** Resolve the Net/SubUni fields from either a Port-Address or a 1-based universe. */
+const resolveAddress = (options: {universe?: number; portAddress?: number}): ArtNetAddress => {
+    if (options.portAddress !== undefined) return splitPortAddress(options.portAddress);
+    if (options.universe !== undefined) return splitUniverseAddress(options.universe);
+    throw new RangeError('ArtDmx requires either `universe` or `portAddress`');
 };
 
 /**
@@ -174,6 +191,7 @@ export const parseArtDmx = (buffer: Buffer): ArtDmxPacket | null => {
         net,
         subNet,
         universe: universe + 1,
+        portAddress: universe,
         length,
         data: Buffer.from(buffer.subarray(18, 18 + length)),
     };

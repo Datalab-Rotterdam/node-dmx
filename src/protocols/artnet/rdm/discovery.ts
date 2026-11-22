@@ -47,19 +47,32 @@ export function encodeDiscoveryResponse(uid: UID): Buffer {
     ]);
 }
 
-/** Decode a DISC_UNIQUE_BRANCH discovery response frame built by {@link encodeDiscoveryResponse}. */
+/**
+ * Decode a DISC_UNIQUE_BRANCH discovery response frame (as built by
+ * {@link encodeDiscoveryResponse}). Per ANSI E1.20 §7.5 the response starts
+ * with 0-7 preamble bytes (0xFE) followed by the 0xAA separator — in-line
+ * devices may shorten the preamble — so the decoder scans for the separator.
+ * Returns `null` for anything that is not a valid, checksum-correct response
+ * (including the garbled result of two devices answering at once).
+ */
 export function decodeDiscoveryResponse(buffer: Buffer): UID | null {
-    const minLength = DISCOVERY_PREAMBLE_LEN + 1 + 12 + 4;
-    if (buffer.length < minLength) return null;
-
-    for (let i = 0; i < DISCOVERY_PREAMBLE_LEN; i++) {
-        if (buffer[i] !== DISCOVERY_PREAMBLE) return null;
+    let separator = 0;
+    while (separator < DISCOVERY_PREAMBLE_LEN && buffer[separator] === DISCOVERY_PREAMBLE) {
+        separator++;
     }
-    if (buffer[DISCOVERY_PREAMBLE_LEN] !== DISCOVERY_SEPARATOR) return null;
+    if (buffer[separator] !== DISCOVERY_SEPARATOR) return null;
 
-    const start = DISCOVERY_PREAMBLE_LEN + 1;
+    const start = separator + 1;
+    if (buffer.length < start + 16) return null;
     const encodedUid = buffer.subarray(start, start + 12);
     const encodedChecksum = buffer.subarray(start + 12, start + 16);
+
+    // Every encoded pair is (byte | 0xAA), (byte | 0x55): those bits must be set.
+    for (let i = 0; i < 8; i++) {
+        const pair = i < 6 ? encodedUid : encodedChecksum;
+        const offset = i < 6 ? i * 2 : (i - 6) * 2;
+        if ((pair[offset]! & 0xaa) !== 0xaa || (pair[offset + 1]! & 0x55) !== 0x55) return null;
+    }
 
     const uidBytes = Buffer.alloc(6);
     for (let i = 0; i < 6; i++) {
@@ -119,7 +132,20 @@ export type DiscoveryOptions = {
 };
 
 /**
- * Run RDM binary-search discovery across full UID range.
+ * Run RDM binary-search discovery across full UID range (ANSI E1.20 §7).
+ *
+ * For each branch a DISC_UNIQUE_BRANCH is sent:
+ * - no reply: the branch is empty;
+ * - exactly one valid, in-range reply: that device is muted and the *same*
+ *   branch is probed again until it is silent, so further devices sharing the
+ *   branch are found;
+ * - replies that do not decode (collision), several distinct UIDs, or a device
+ *   that cannot be muted: the branch is split in two and both halves searched.
+ *
+ * With `muteFound: false` devices are never muted; a branch with a single
+ * clean reply is then considered done (any second device in it would have
+ * collided), so discovery still terminates.
+ *
  * @param transport RDM transport implementation.
  * @param options Discovery behavior flags and source UID.
  */
@@ -129,61 +155,114 @@ export async function discoverDevices(
 ): Promise<RdmDiscoveryResult[]> {
     const {sourceUid, muteFound = true, unmuteAtEnd = false, timeoutMs} = options;
     const results: RdmDiscoveryResult[] = [];
-    const muted: UID[] = [];
+    const byUid = new Map<bigint, RdmDiscoveryResult>();
+    let fallbackTransaction = 0;
+    const nextTransaction = (): number => {
+        const fromTransport = transport.nextTransactionNumber?.();
+        if (fromTransport !== undefined) return fromTransport & 0xff;
+        const tn = fallbackTransaction;
+        fallbackTransaction = (tn + 1) & 0xff;
+        return tn;
+    };
 
-    async function discoverRange(lower: UID, upper: UID): Promise<void> {
-        const response = await transport.sendDiscoveryUniqueBranch(lower, upper, {timeoutMs});
-        const decoded = response.responses
-            .map((res) => decodeDiscoveryResponse(res))
-            .filter((uid): uid is UID => uid !== null && uidInRange(uid, lower, upper));
-
-        if (decoded.length === 0) return;
-        if (decoded.length === 1) {
-            const uid = decoded[0]!;
-            let muteOk = false;
-            if (muteFound) {
-                if (transport.sendMute) {
-                    muteOk = await transport.sendMute(uid, {timeoutMs});
-                } else {
-                    const muteRequest = {
-                        destinationUid: uid,
-                        sourceUid,
-                        transactionNumber: results.length & 0xff,
-                        portId: 1,
-                        subDevice: 0,
-                        commandClass: RdmCommandClass.DISCOVERY_COMMAND,
-                        pid: PIDS.DISC_MUTE,
-                    };
-                    const response = await transport.send(muteRequest, {timeoutMs});
-                    muteOk = response !== null;
-                }
-            }
-            results.push({uid, muted: muteOk});
-            if (muteOk) muted.push(uid);
-            return;
+    async function mute(uid: UID): Promise<boolean> {
+        if (transport.sendMute) {
+            return transport.sendMute(uid, {timeoutMs});
         }
+        const response = await transport.send(
+            {
+                destinationUid: uid,
+                sourceUid,
+                transactionNumber: nextTransaction(),
+                portId: 1,
+                subDevice: 0,
+                commandClass: RdmCommandClass.DISCOVERY_COMMAND,
+                pid: PIDS.DISC_MUTE,
+            },
+            {timeoutMs},
+        );
+        return response !== null;
+    }
 
+    async function split(lower: UID, upper: UID): Promise<void> {
         const low = uidToBigInt(lower);
         const high = uidToBigInt(upper);
         if (low >= high) return;
         const mid = (low + high) / 2n;
         await discoverRange(lower, uidFromBigInt(mid));
-        if (mid + 1n <= high) {
-            await discoverRange(uidFromBigInt(mid + 1n), upper);
+        await discoverRange(uidFromBigInt(mid + 1n), upper);
+    }
+
+    async function discoverRange(lower: UID, upper: UID): Promise<void> {
+        // Each pass either finds the branch silent, mutes one new device and
+        // re-probes, or splits; muting a distinct device per pass bounds the loop.
+        for (;;) {
+            const response = await transport.sendDiscoveryUniqueBranch(lower, upper, {timeoutMs});
+            const frames = response.responses;
+            if (frames.length === 0) return;
+
+            const distinct = new Map<bigint, UID>();
+            let collision = false;
+            for (const frame of frames) {
+                const uid = decodeDiscoveryResponse(frame);
+                if (uid === null || !uidInRange(uid, lower, upper)) {
+                    collision = true;
+                    continue;
+                }
+                distinct.set(uidToBigInt(uid), uid);
+            }
+            if (collision || distinct.size !== 1) {
+                await split(lower, upper);
+                return;
+            }
+
+            const [key, uid] = [...distinct.entries()][0]!;
+            const known = byUid.get(key);
+            if (!muteFound) {
+                if (!known) {
+                    const result = {uid, muted: false};
+                    byUid.set(key, result);
+                    results.push(result);
+                }
+                return;
+            }
+            if (known?.muted) {
+                // Device keeps answering although it ACKed DISC_MUTE: narrow
+                // the branch instead of looping on it forever.
+                await split(lower, upper);
+                return;
+            }
+
+            const muteOk = await mute(uid);
+            if (known) {
+                known.muted = muteOk;
+            } else {
+                const result = {uid, muted: muteOk};
+                byUid.set(key, result);
+                results.push(result);
+            }
+            if (!muteOk) {
+                // Could not silence it: split so other devices in this branch
+                // are not hidden behind it.
+                await split(lower, upper);
+                return;
+            }
         }
     }
 
     await discoverRange(UID_MIN, UID_MAX);
 
     if (unmuteAtEnd) {
-        for (const uid of muted) {
+        for (const result of results) {
+            if (!result.muted) continue;
+            const uid = result.uid;
             if (transport.sendUnMute) {
                 await transport.sendUnMute(uid, {timeoutMs});
             } else {
                 const unmuteRequest = {
                     destinationUid: uid,
                     sourceUid,
-                    transactionNumber: results.length & 0xff,
+                    transactionNumber: nextTransaction(),
                     portId: 1,
                     subDevice: 0,
                     commandClass: RdmCommandClass.DISCOVERY_COMMAND,

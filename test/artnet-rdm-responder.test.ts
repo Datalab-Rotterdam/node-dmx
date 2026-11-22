@@ -27,7 +27,7 @@ describe('ArtNetRdmResponder (loopback UDP, real ArtNetRdmClient controller)', (
         await new Promise((resolve) => setTimeout(resolve, 20));
         const port = (responder as unknown as {socket: {address(): {port: number}}}).socket.address().port;
 
-        client = new ArtNetRdmClient({host: '127.0.0.1', port, timeoutMs: 300});
+        client = new ArtNetRdmClient({host: '127.0.0.1', port, timeoutMs: 300, localPort: 0});
         const uids = await client.getTod(1);
 
         expect(uids).toEqual([deviceUid]);
@@ -39,7 +39,7 @@ describe('ArtNetRdmResponder (loopback UDP, real ArtNetRdmClient controller)', (
         await new Promise((resolve) => setTimeout(resolve, 20));
         const port = (responder as unknown as {socket: {address(): {port: number}}}).socket.address().port;
 
-        client = new ArtNetRdmClient({host: '127.0.0.1', port, timeoutMs: 300});
+        client = new ArtNetRdmClient({host: '127.0.0.1', port, timeoutMs: 300, localPort: 0});
         const response = await client.rdmTransaction(1, {
             destinationUid: deviceUid,
             sourceUid: controllerUid,

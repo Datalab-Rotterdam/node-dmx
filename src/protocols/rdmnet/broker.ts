@@ -319,11 +319,24 @@ export const decodeBrokerMessage = (buf: Buffer): BrokerMessage => {
         case BrokerVector.ClientAdd:
         case BrokerVector.ClientRemove:
         case BrokerVector.ClientEntryChange: {
+            // Lists may mix RPT and EPT Client Entries. Only RPT entries are
+            // modelled; any other client protocol is skipped using its own
+            // PDU length so one EPT client doesn't break decoding of the list.
             const clients: RptClientEntry[] = [];
             let offset = 0;
             while (offset < data.length) {
-                const {entry, length: entryLength} = decodeClientEntry(data, offset);
-                clients.push(entry);
+                if (offset + CLIENT_ENTRY_HEADER_LENGTH > data.length) {
+                    throw new RangeError('Client Entry header truncated');
+                }
+                const {flagsNibble: entryFlags, length: entryLength} = readPduLength(data, offset);
+                assertPduFlags(entryFlags, 'Client Entry');
+                if (entryLength < CLIENT_ENTRY_HEADER_LENGTH || offset + entryLength > data.length) {
+                    throw new RangeError(`Client Entry PDU length ${entryLength} invalid`);
+                }
+                const clientProtocol = data.readUInt32BE(offset + 3);
+                if (clientProtocol === ClientProtocol.Rpt) {
+                    clients.push(decodeClientEntry(data, offset).entry);
+                }
                 offset += entryLength;
             }
             return {vector, clients};

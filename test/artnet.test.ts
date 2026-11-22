@@ -177,9 +177,21 @@ describe('parseArtDmx', () => {
             net: 1,
             subNet: 0,
             universe: 257,
+            portAddress: 256,
             length: 4,
             data: Buffer.from([1, 2, 3, 4]),
         });
+    });
+
+    it('addresses by raw Port-Address, including Port-Address 0', () => {
+        const packet = buildArtDmx({portAddress: 0, sequence: 1, data: Uint8Array.from([9, 9])});
+        expect(parseArtDmx(packet)).toMatchObject({portAddress: 0, universe: 1});
+        expect(() => buildArtDmx({portAddress: 32768, sequence: 1, data: new Uint8Array(2)})).toThrow(RangeError);
+    });
+
+    it('pads odd and too-short ArtDMX lengths to an even length >= 2', () => {
+        expect(buildArtDmx({universe: 1, sequence: 1, data: Uint8Array.from([1, 2, 3])}).readUInt16BE(16)).toBe(4);
+        expect(buildArtDmx({universe: 1, sequence: 1, data: Uint8Array.from([1])}).readUInt16BE(16)).toBe(2);
     });
 
     it('throws on malformed OpDmx payload length', () => {

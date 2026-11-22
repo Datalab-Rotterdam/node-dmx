@@ -44,7 +44,12 @@ export interface ArtNetReceiverEvents {
     packet: [ArtNetPacketMeta];
     /** Parsed ArtDMX packet (optionally filtered by universe). */
     dmx: [ArtNetDmxMessage];
-    /** Parse, validation, bind, or socket errors. */
+    /**
+     * A packet carried the Art-Net ID but failed validation (e.g. bad ArtDMX
+     * length). Malformed network input never raises `error`.
+     */
+    invalidPacket: [error: Error, rinfo: {address: string; port: number}];
+    /** Bind or socket errors. Only emitted when a listener is attached. */
     error: [Error];
 }
 
@@ -93,11 +98,13 @@ export class ArtNetReceiver extends EventEmitter<ArtNetReceiverEvents> {
                     sourcePort: rinfo.port,
                 });
             } catch (err) {
-                this.emit('error', err as Error);
+                this.emit('invalidPacket', err as Error, {address: rinfo.address, port: rinfo.port});
             }
         });
 
-        this.socket.on('error', (err) => this.emit('error', err));
+        this.socket.on('error', (err) => {
+            if (this.listenerCount('error') > 0) this.emit('error', err);
+        });
         this.socket.bind({port, address: iface ?? '0.0.0.0'});
     }
 
@@ -124,7 +131,11 @@ export class ArtNetReceiver extends EventEmitter<ArtNetReceiverEvents> {
 
     /** Close the underlying UDP socket. */
     public close(callback?: () => void): this {
-        this.socket.close(callback);
+        try {
+            this.socket.close(callback);
+        } catch {
+            callback?.();
+        }
         return this;
     }
 

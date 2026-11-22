@@ -38,18 +38,32 @@ export const LLRP_BROADCAST_CID = Buffer.from('fbad822cbd0c4d4cbdc87eabebc85aff'
 
 export type EptDataMessage = {
     vector: EptVector.Data;
-    sequence: number;
+    /** CID of the EPT Client this message is addressed to (required on the wire). Decoded messages always carry it. */
+    destinationCid?: Buffer;
+    /** @deprecated Not part of the E1.33 EPT PDU; ignored when encoding and never set when decoding. */
+    sequence?: number;
+    /** ESTA manufacturer ID half of the EPT protocol vector. */
     manufacturerId: number;
+    /** Manufacturer-assigned protocol ID half of the EPT protocol vector. */
     protocolId: number;
     payload: Buffer;
 };
 
 export type EptStatusMessage = {
     vector: EptVector.Status;
-    sequence: number;
-    statusCode: number;
+    /** CID of the EPT Client this message is addressed to (required on the wire). Decoded messages always carry it. */
+    destinationCid?: Buffer;
+    /** @deprecated Not part of the E1.33 EPT PDU; ignored when encoding and never set when decoding. */
+    sequence?: number;
+    statusCode: EptStatusCode | number;
     text?: string;
 };
+
+/** EPT Status codes (E1.33 §8, defs.h). */
+export enum EptStatusCode {
+    UnknownCid = 0x0001,
+    UnknownVector = 0x0002,
+}
 
 export type EptMessage = EptDataMessage | EptStatusMessage;
 
@@ -98,60 +112,96 @@ function assertUidLength(uid: Buffer, name: string): void {
     }
 }
 
+/** EPT PDU header: flags+length(3) + vector(4) + destination CID(16). */
+const EPT_PDU_HEADER_LENGTH = 23;
+/** EPT Data PDU header: flags+length(3) + protocol vector(4) = manufacturer ID(2) + protocol ID(2). */
+const EPT_DATA_HEADER_LENGTH = 7;
+/** EPT Status PDU header: flags+length(3) + status code(2). */
+const EPT_STATUS_HEADER_LENGTH = 5;
+/** Maximum EPT status string length (defs.h `EPT_STATUS_STRING_MAXLEN`). */
+const EPT_STATUS_STRING_MAXLEN = 1024;
+
+/**
+ * Build wire bytes for one EPT PDU (placed after the 23-byte root layer by
+ * the caller): flags+length, vector (Data/Status), destination CID, then
+ * one EPT Data PDU (protocol vector + opaque data) or EPT Status PDU
+ * (status code + optional UTF-8 status string).
+ */
 export const encodeEptMessage = (message: EptMessage): Buffer => {
-    if (message.vector === EptVector.Data) {
-        const out = Buffer.alloc(16 + message.payload.length);
-        out.writeUInt32BE(message.vector, 0);
-        out.writeUInt32BE(message.sequence >>> 0, 4);
-        out.writeUInt16BE(message.manufacturerId & 0xffff, 8);
-        out.writeUInt16BE(message.protocolId & 0xffff, 10);
-        out.writeUInt32BE(message.payload.length >>> 0, 12);
-        message.payload.copy(out, 16);
-        return out;
+    const destinationCid = message.destinationCid;
+    if (!destinationCid || destinationCid.length !== 16) {
+        throw new RangeError(`EPT destinationCid must be 16 bytes, got ${destinationCid?.length ?? 'none'}`);
     }
 
-    const text = Buffer.from(message.text ?? '', 'utf8');
-    const out = Buffer.alloc(12 + text.length);
-    out.writeUInt32BE(message.vector, 0);
-    out.writeUInt32BE(message.sequence >>> 0, 4);
-    out.writeUInt16BE(message.statusCode & 0xffff, 8);
-    out.writeUInt16BE(text.length & 0xffff, 10);
-    text.copy(out, 12);
+    let sub: Buffer;
+    if (message.vector === EptVector.Data) {
+        sub = Buffer.alloc(EPT_DATA_HEADER_LENGTH + message.payload.length);
+        writePduLength(sub, 0, sub.length);
+        sub.writeUInt16BE(message.manufacturerId & 0xffff, 3);
+        sub.writeUInt16BE(message.protocolId & 0xffff, 5);
+        message.payload.copy(sub, EPT_DATA_HEADER_LENGTH);
+    } else if (message.vector === EptVector.Status) {
+        const text = Buffer.from(message.text ?? '', 'utf8');
+        if (text.length > EPT_STATUS_STRING_MAXLEN) {
+            throw new RangeError(`EPT status string exceeds ${EPT_STATUS_STRING_MAXLEN} bytes`);
+        }
+        sub = Buffer.alloc(EPT_STATUS_HEADER_LENGTH + text.length);
+        writePduLength(sub, 0, sub.length);
+        sub.writeUInt16BE(message.statusCode & 0xffff, 3);
+        text.copy(sub, EPT_STATUS_HEADER_LENGTH);
+    } else {
+        throw new Error('Unsupported EPT message');
+    }
+
+    const out = Buffer.alloc(EPT_PDU_HEADER_LENGTH + sub.length);
+    writePduLength(out, 0, out.length);
+    out.writeUInt32BE(message.vector, 3);
+    destinationCid.copy(out, 7);
+    sub.copy(out, EPT_PDU_HEADER_LENGTH);
     return out;
 };
 
+/** Parse one EPT PDU's bytes (as produced by {@link encodeEptMessage}). Bytes after the PDU are ignored. */
 export const decodeEptMessage = (buffer: Buffer): EptMessage => {
-    if (buffer.length < 8) throw new RangeError(`EPT message too short: ${buffer.length}`);
-    const vector = buffer.readUInt32BE(0);
-    const sequence = buffer.readUInt32BE(4);
+    if (buffer.length < EPT_PDU_HEADER_LENGTH) throw new RangeError(`EPT PDU too short: ${buffer.length}`);
+    const {flagsNibble, length} = readPduLength(buffer, 0);
+    assertPduFlags(flagsNibble, 'EPT PDU');
+    if (length < EPT_PDU_HEADER_LENGTH) throw new RangeError(`EPT PDU length ${length} too short`);
+    if (length > buffer.length) throw new RangeError('EPT PDU length exceeds buffer');
+    const vector = buffer.readUInt32BE(3);
+    const destinationCid = Buffer.from(buffer.subarray(7, 23));
+    const subOffset = EPT_PDU_HEADER_LENGTH;
 
     if (vector === EptVector.Data) {
-        if (buffer.length < 16) throw new RangeError('EPT data message too short');
-        const manufacturerId = buffer.readUInt16BE(8);
-        const protocolId = buffer.readUInt16BE(10);
-        const payloadLength = buffer.readUInt32BE(12);
-        if (16 + payloadLength > buffer.length) throw new RangeError('EPT payload length exceeds packet length');
-        if (16 + payloadLength !== buffer.length) throw new RangeError('EPT payload has trailing bytes');
+        if (subOffset + EPT_DATA_HEADER_LENGTH > length) throw new RangeError('EPT Data PDU too short');
+        const {flagsNibble: subFlags, length: subLength} = readPduLength(buffer, subOffset);
+        assertPduFlags(subFlags, 'EPT Data PDU');
+        if (subLength < EPT_DATA_HEADER_LENGTH || subOffset + subLength > length) {
+            throw new RangeError(`EPT Data PDU length ${subLength} invalid`);
+        }
         return {
             vector: EptVector.Data,
-            sequence,
-            manufacturerId,
-            protocolId,
-            payload: Buffer.from(buffer.subarray(16, 16 + payloadLength)),
+            destinationCid,
+            manufacturerId: buffer.readUInt16BE(subOffset + 3),
+            protocolId: buffer.readUInt16BE(subOffset + 5),
+            payload: Buffer.from(buffer.subarray(subOffset + EPT_DATA_HEADER_LENGTH, subOffset + subLength)),
         };
     }
 
     if (vector === EptVector.Status) {
-        if (buffer.length < 12) throw new RangeError('EPT status message too short');
-        const statusCode = buffer.readUInt16BE(8);
-        const textLength = buffer.readUInt16BE(10);
-        if (12 + textLength > buffer.length) throw new RangeError('EPT status text exceeds packet length');
-        if (12 + textLength !== buffer.length) throw new RangeError('EPT status has trailing bytes');
+        if (subOffset + EPT_STATUS_HEADER_LENGTH > length) throw new RangeError('EPT Status PDU too short');
+        const {flagsNibble: subFlags, length: subLength} = readPduLength(buffer, subOffset);
+        assertPduFlags(subFlags, 'EPT Status PDU');
+        if (subLength < EPT_STATUS_HEADER_LENGTH || subOffset + subLength > length) {
+            throw new RangeError(`EPT Status PDU length ${subLength} invalid`);
+        }
+        const textBytes = buffer.subarray(subOffset + EPT_STATUS_HEADER_LENGTH, subOffset + subLength);
+        const nul = textBytes.indexOf(0);
         return {
             vector: EptVector.Status,
-            sequence,
-            statusCode,
-            text: buffer.toString('utf8', 12, 12 + textLength),
+            destinationCid,
+            statusCode: buffer.readUInt16BE(subOffset + 3),
+            text: textBytes.toString('utf8', 0, nul === -1 ? textBytes.length : nul),
         };
     }
 
@@ -228,38 +278,49 @@ export const encodeLlrpMessage = (message: LlrpMessage): Buffer => {
     return buf;
 };
 
-/** Parse one LLRP PDU's bytes (as produced by {@link encodeLlrpMessage}). */
+/**
+ * Parse one LLRP PDU's bytes (as produced by {@link encodeLlrpMessage}).
+ * Every nested length is bounds-checked against both the enclosing PDU and
+ * the buffer, so malformed input throws a RangeError/Error rather than
+ * producing truncated fields.
+ */
 export const decodeLlrpMessage = (buffer: Buffer): LlrpMessage => {
     if (buffer.length < LLRP_PDU_HEADER_LENGTH) throw new RangeError(`LLRP PDU too short: ${buffer.length}`);
     const {flagsNibble, length} = readPduLength(buffer, 0);
     assertPduFlags(flagsNibble, 'LLRP PDU');
+    if (length < LLRP_PDU_HEADER_LENGTH) throw new RangeError(`LLRP PDU length ${length} too short`);
     if (length > buffer.length) throw new RangeError('LLRP PDU length exceeds buffer');
     const vector = buffer.readUInt32BE(3) as LlrpVector;
     const destinationCid = Buffer.from(buffer.subarray(7, 23));
     const transactionNumber = buffer.readUInt32BE(23);
     const dataOffset = LLRP_PDU_HEADER_LENGTH;
 
-    if (vector === LlrpVector.ProbeRequest) {
-        if (dataOffset + 4 > length) throw new RangeError('LLRP probe request too short');
+    /** Reads the nested data PDU header and checks it fits inside the LLRP PDU. */
+    const readDataPdu = (minLength: number, context: string): number => {
+        if (dataOffset + 3 > length) throw new RangeError(`${context} truncated`);
         const {flagsNibble: subFlags, length: dataLength} = readPduLength(buffer, dataOffset);
-        assertPduFlags(subFlags, 'LLRP Probe Request data');
-        if (dataLength < 18) throw new RangeError('LLRP probe request data too short');
+        assertPduFlags(subFlags, context);
+        if (dataLength < minLength) throw new RangeError(`${context} too short: ${dataLength}`);
+        if (dataOffset + dataLength > length) throw new RangeError(`${context} length ${dataLength} exceeds LLRP PDU`);
+        return dataLength;
+    };
+
+    if (vector === LlrpVector.ProbeRequest) {
+        const dataLength = readDataPdu(18, 'LLRP Probe Request data');
         const lowerUid = Buffer.from(buffer.subarray(dataOffset + 4, dataOffset + 10));
         const upperUid = Buffer.from(buffer.subarray(dataOffset + 10, dataOffset + 16));
         const filter = buffer.readUInt16BE(dataOffset + 16);
         const knownUidsBytes = dataLength - 18;
         if (knownUidsBytes % 6 !== 0) throw new RangeError('LLRP probe request known-UID list is malformed');
         const knownUids: Buffer[] = [];
-        for (let o = dataOffset + 18; o < dataOffset + dataLength; o += 6) {
+        for (let o = dataOffset + 18; o + 6 <= dataOffset + dataLength; o += 6) {
             knownUids.push(Buffer.from(buffer.subarray(o, o + 6)));
         }
         return {vector, destinationCid, transactionNumber, lowerUid, upperUid, filter, knownUids};
     }
 
     if (vector === LlrpVector.ProbeReply) {
-        if (dataOffset + PROBE_REPLY_DATA_LENGTH > length) throw new RangeError('LLRP probe reply too short');
-        const {flagsNibble: subFlags} = readPduLength(buffer, dataOffset);
-        assertPduFlags(subFlags, 'LLRP Probe Reply data');
+        readDataPdu(PROBE_REPLY_DATA_LENGTH, 'LLRP Probe Reply data');
         const targetUid = Buffer.from(buffer.subarray(dataOffset + 4, dataOffset + 10));
         const hardwareAddress = Buffer.from(buffer.subarray(dataOffset + 10, dataOffset + 16));
         const componentType = buffer.readUInt8(dataOffset + 16) as LlrpComponentType;
@@ -267,10 +328,9 @@ export const decodeLlrpMessage = (buffer: Buffer): LlrpMessage => {
     }
 
     if (vector === LlrpVector.RdmCommand) {
-        if (dataOffset + 3 > length) throw new RangeError('LLRP RDM message too short');
-        const {flagsNibble: subFlags, length: dataLength} = readPduLength(buffer, dataOffset);
-        assertPduFlags(subFlags, 'LLRP RDM data');
+        const dataLength = readDataPdu(4, 'LLRP RDM data');
         const rdm = Buffer.from(buffer.subarray(dataOffset + 3, dataOffset + dataLength));
+        if (rdm[0] !== 0xcc) throw new Error('LLRP RDM data does not start with the 0xCC start code');
         return {vector, destinationCid, transactionNumber, rdm};
     }
 

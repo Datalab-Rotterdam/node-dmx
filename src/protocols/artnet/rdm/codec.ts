@@ -93,7 +93,7 @@ export function encodeRdmResponse(response: RdmResponse): Buffer {
 /**
  * Decode and validate an RDM response frame.
  * @param buf Raw RDM bytes including checksum.
- * @throws Error when start code, length, or checksum is invalid.
+ * @throws Error when start code, length (Message Length must equal 24 + PDL), or checksum is invalid.
  */
 export function decodeRdmResponse(buf: Buffer): RdmResponse {
     const frame = decodeRdmFrame(buf);
@@ -113,7 +113,7 @@ export function decodeRdmResponse(buf: Buffer): RdmResponse {
 /**
  * Decode and validate an RDM request frame.
  * @param buf Raw RDM bytes including checksum.
- * @throws Error when start code, length, or checksum is invalid.
+ * @throws Error when start code, length (Message Length must equal 24 + PDL), or checksum is invalid.
  */
 export function decodeRdmRequest(buf: Buffer): RdmRequest {
     const frame = decodeRdmFrame(buf);
@@ -154,6 +154,11 @@ function decodeRdmFrame(buf: Buffer): DecodedRdmFrame {
     if (messageLength < RDM_MIN_MESSAGE_LENGTH || messageLength + 2 > buf.length) {
         throw new RangeError(`Invalid RDM message length ${messageLength}`);
     }
+    // E1.20 section 6.2.3: Message Length covers the 24-byte header plus PDL exactly.
+    const pdl = buf.readUInt8(23);
+    if (pdl > RDM_MAX_PDL || messageLength !== RDM_MIN_MESSAGE_LENGTH + pdl) {
+        throw new RangeError(`RDM message length ${messageLength} does not match PDL ${pdl}`);
+    }
     const checksum = buf.readUInt16BE(messageLength);
     const expected = checksum16(buf, messageLength);
     if (checksum !== expected) {
@@ -168,11 +173,7 @@ function decodeRdmFrame(buf: Buffer): DecodedRdmFrame {
     const subDevice = buf.readUInt16BE(18);
     const commandClass = buf.readUInt8(20) as RdmCommandClass;
     const pid = buf.readUInt16BE(21);
-    const pdl = buf.readUInt8(23);
-    const dataEnd = 24 + pdl;
-    if (dataEnd > messageLength) {
-        throw new RangeError('Invalid PDL');
-    }
+    const dataEnd = RDM_MIN_MESSAGE_LENGTH + pdl;
     const parameterData = Buffer.from(buf.subarray(24, dataEnd));
 
     return {

@@ -29,4 +29,9 @@ export interface RdmTransport {
     sendMute?(uid: UID, options?: RdmTransportOptions): Promise<boolean>;
     /** Optional transport-native DISC_UN_MUTE helper. */
     sendUnMute?(uid: UID, options?: RdmTransportOptions): Promise<boolean>;
+    /**
+     * Optional per-transport transaction number source (0-255, wrapping).
+     * Used by the request helpers when no explicit transaction number is given.
+     */
+    nextTransactionNumber?(): number;
 }

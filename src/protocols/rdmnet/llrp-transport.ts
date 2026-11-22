@@ -10,8 +10,15 @@
  * against ETCLabs/RDMnet `src/rdmnet/core/llrp_manager.c`; `LlrpTarget`
  * implements the responder side (randomized reply backoff to reduce
  * collisions), verified against `llrp_target.c`.
+ *
+ * CID addressing: Probe Requests go to {@link LLRP_BROADCAST_CID} (or one
+ * Target's CID); RDM commands go to exactly one Target's CID; every reply
+ * (Probe Reply / RDM response) is addressed to the requesting Manager's CID
+ * (the sender CID from the request's root layer). Endpoints drop anything
+ * not addressed to them.
  */
-import {createSocket, type Socket} from 'dgram';
+import {createSocket, type RemoteInfo, type Socket} from 'dgram';
+import {EventEmitter} from 'events';
 
 import {
     LLRP_CLEAN_SENDS_TO_ADVANCE,
@@ -26,6 +33,7 @@ import {
 import {
     LLRP_BROADCAST_CID,
     LlrpComponentType,
+    LlrpFilter,
     type LlrpMessage,
     LlrpVector,
     decodeLlrpMessage,
@@ -50,6 +58,19 @@ export type LlrpDiscoveredTarget = {
     componentType: LlrpComponentType;
 };
 
+/** Events emitted by {@link LlrpManager} / {@link LlrpTarget}. */
+export interface LlrpEndpointEvents {
+    /**
+     * Socket-level errors. Only emitted when at least one `'error'` listener
+     * is attached, so an unobserved socket error never crashes the process.
+     */
+    error: [error: Error];
+    /** A received datagram could not be parsed as an LLRP packet and was dropped (diagnostic only). */
+    malformedPacket: [error: Error, rinfo: RemoteInfo];
+    /** Every well-formed inbound LLRP message not sent by this endpoint itself. */
+    llrpMessage: [message: LlrpMessage, sourceCid: Buffer, rinfo: RemoteInfo];
+}
+
 function sleep(ms: number): Promise<void> {
     return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -58,34 +79,50 @@ function uidListIncludes(list: UID[], uid: UID): boolean {
     return list.some((u) => uidCompare(u, uid) === 0);
 }
 
-abstract class LlrpEndpoint {
+abstract class LlrpEndpoint extends EventEmitter<LlrpEndpointEvents> {
     protected readonly socket: Socket;
     protected readonly cid: Buffer;
     private readonly iface?: string;
     private bound = false;
+    private bindPromise: Promise<void> | null = null;
+    private closed = false;
 
     protected constructor(cid: Buffer | undefined, iface: string | undefined) {
+        super();
         this.cid = cid ? Buffer.from(cid) : makeCid();
         if (this.cid.length !== 16) throw new RangeError(`LLRP CID must be 16 bytes, got ${this.cid.length}`);
         this.iface = iface;
         this.socket = createSocket({type: 'udp4', reuseAddr: true});
+        this.socket.on('error', (err) => this.emitError(err));
+        this.socket.on('message', (msg, rinfo) => this.dispatch(msg, rinfo));
     }
 
     protected async bind(joinGroup: string): Promise<void> {
         if (this.bound) return;
-        await new Promise<void>((resolve, reject) => {
-            this.socket.once('error', reject);
-            this.socket.bind(LLRP_MULTICAST_PORT, () => {
-                this.socket.removeListener('error', reject);
-                try {
-                    this.socket.addMembership(joinGroup, this.iface);
-                    resolve();
-                } catch (err) {
-                    reject(err as Error);
-                }
-            });
-        });
-        this.bound = true;
+        if (!this.bindPromise) {
+            this.bindPromise = new Promise<void>((resolve, reject) => {
+                this.socket.once('error', reject);
+                this.socket.bind(LLRP_MULTICAST_PORT, () => {
+                    this.socket.removeListener('error', reject);
+                    try {
+                        this.socket.addMembership(joinGroup, this.iface);
+                        if (this.iface) this.socket.setMulticastInterface(this.iface);
+                        resolve();
+                    } catch (err) {
+                        reject(err as Error);
+                    }
+                });
+            }).then(
+                () => {
+                    this.bound = true;
+                },
+                (err: unknown) => {
+                    this.bindPromise = null;
+                    throw err;
+                },
+            );
+        }
+        await this.bindPromise;
     }
 
     protected send(message: LlrpMessage, destinationGroup: string): Promise<void> {
@@ -102,13 +139,51 @@ abstract class LlrpEndpoint {
         });
     }
 
+    /** Returns `true` when an LLRP message's destination CID is this endpoint's own CID. */
+    protected isAddressedToMe(message: LlrpMessage): boolean {
+        return message.destinationCid.equals(this.cid);
+    }
+
+    /** Parses one datagram; malformed input is dropped (never thrown from the socket handler). */
+    private dispatch(msg: Buffer, rinfo: RemoteInfo): void {
+        let llrp: LlrpMessage;
+        let sourceCid: Buffer;
+        try {
+            const packet = parseRdmnetPacket(msg);
+            if (packet.vector !== RdmnetRootVector.Llrp) return;
+            if (packet.cid.equals(this.cid)) return; // ignore multicast loopback of our own send
+            sourceCid = packet.cid;
+            llrp = decodeLlrpMessage(packet.data);
+        } catch (err) {
+            this.emit('malformedPacket', err instanceof Error ? err : new Error(String(err)), rinfo);
+            return;
+        }
+        try {
+            this.emit('llrpMessage', llrp, sourceCid, rinfo);
+        } catch (err) {
+            // A throwing listener must not take down the socket's event loop.
+            this.emitError(err instanceof Error ? err : new Error(String(err)));
+        }
+    }
+
+    protected emitError(err: Error): void {
+        if (this.listenerCount('error') > 0) this.emit('error', err);
+    }
+
     /** Returns this endpoint's CID. */
     public getCid(): Buffer {
         return Buffer.from(this.cid);
     }
 
+    /** Closes the UDP socket. Safe to call more than once. */
     public close(): void {
-        this.socket.close();
+        if (this.closed) return;
+        this.closed = true;
+        try {
+            this.socket.close();
+        } catch {
+            // Socket was never bound or is already closed.
+        }
     }
 }
 
@@ -191,25 +266,18 @@ export class LlrpManager extends LlrpEndpoint {
     public async probeOnce(lower: UID, upper: UID, knownUids: UID[] = []): Promise<LlrpDiscoveredTarget[]> {
         const transactionNumber = this.nextTransactionNumber();
         const replies: LlrpDiscoveredTarget[] = [];
-        const onMessage = (msg: Buffer): void => {
-            try {
-                const packet = parseRdmnetPacket(msg);
-                if (packet.vector !== RdmnetRootVector.Llrp) return;
-                if (packet.cid.equals(this.cid)) return; // ignore multicast loopback of our own send
-                const llrp = decodeLlrpMessage(packet.data);
-                if (llrp.vector !== LlrpVector.ProbeReply) return;
-                if (llrp.transactionNumber !== transactionNumber) return;
-                replies.push({
-                    uid: uidFromBuffer(llrp.targetUid),
-                    hardwareAddress: llrp.hardwareAddress,
-                    componentType: llrp.componentType,
-                });
-            } catch {
-                // Ignore malformed/unrelated datagrams sharing this multicast group.
-            }
+        const onMessage = (llrp: LlrpMessage): void => {
+            if (llrp.vector !== LlrpVector.ProbeReply) return;
+            if (!this.isAddressedToMe(llrp)) return; // replies must be addressed to this Manager's CID
+            if (llrp.transactionNumber !== transactionNumber) return;
+            replies.push({
+                uid: uidFromBuffer(llrp.targetUid),
+                hardwareAddress: llrp.hardwareAddress,
+                componentType: llrp.componentType,
+            });
         };
 
-        this.socket.on('message', onMessage);
+        this.on('llrpMessage', onMessage);
         try {
             await this.send(
                 {
@@ -224,7 +292,7 @@ export class LlrpManager extends LlrpEndpoint {
             );
             await sleep(LLRP_TIMEOUT_MS);
         } finally {
-            this.socket.off('message', onMessage);
+            this.off('llrpMessage', onMessage);
         }
         return replies;
     }
@@ -242,19 +310,12 @@ export class LlrpManager extends LlrpEndpoint {
     /** Waits for one RDM response (frame starting with 0xCC) correlated by transaction number. */
     public waitForRdmResponse(transactionNumber: number, timeoutMs = LLRP_TIMEOUT_MS): Promise<Buffer> {
         return new Promise<Buffer>((resolve, reject) => {
-            const onMessage = (msg: Buffer): void => {
-                try {
-                    const packet = parseRdmnetPacket(msg);
-                    if (packet.vector !== RdmnetRootVector.Llrp) return;
-                    if (packet.cid.equals(this.cid)) return; // ignore multicast loopback of our own send
-                    const llrp = decodeLlrpMessage(packet.data);
-                    if (llrp.vector !== LlrpVector.RdmCommand) return;
-                    if (llrp.transactionNumber !== transactionNumber) return;
-                    cleanup();
-                    resolve(llrp.rdm);
-                } catch {
-                    // Ignore malformed/unrelated datagrams.
-                }
+            const onMessage = (llrp: LlrpMessage): void => {
+                if (llrp.vector !== LlrpVector.RdmCommand) return;
+                if (!this.isAddressedToMe(llrp)) return;
+                if (llrp.transactionNumber !== transactionNumber) return;
+                cleanup();
+                resolve(llrp.rdm);
             };
             const timer = setTimeout(() => {
                 cleanup();
@@ -262,9 +323,9 @@ export class LlrpManager extends LlrpEndpoint {
             }, timeoutMs);
             const cleanup = (): void => {
                 clearTimeout(timer);
-                this.socket.off('message', onMessage);
+                this.off('llrpMessage', onMessage);
             };
-            this.socket.on('message', onMessage);
+            this.on('llrpMessage', onMessage);
         });
     }
 
@@ -291,6 +352,14 @@ export class LlrpTarget extends LlrpEndpoint {
     private readonly hardwareAddress: Buffer;
     private readonly componentType: LlrpComponentType;
     private readonly onRdmCommand?: LlrpTargetOptions['onRdmCommand'];
+    private started = false;
+    private readonly onLlrpMessage = (message: LlrpMessage, sourceCid: Buffer): void => {
+        try {
+            this.handleMessage(message, sourceCid);
+        } catch (err) {
+            this.emitError(err instanceof Error ? err : new Error(String(err)));
+        }
+    };
 
     constructor(options: LlrpTargetOptions) {
         super(options.cid, options.iface);
@@ -303,63 +372,62 @@ export class LlrpTarget extends LlrpEndpoint {
         this.onRdmCommand = options.onRdmCommand;
     }
 
-    /** Joins the request multicast group and starts answering Probe Requests. */
+    /** Joins the request multicast group and starts answering Probe Requests. Idempotent. */
     public async start(): Promise<void> {
         await this.bind(LLRP_MULTICAST_REQUEST_GROUP);
-        this.socket.on('message', (msg) => this.handleMessage(msg));
+        if (this.started) return;
+        this.started = true;
+        this.on('llrpMessage', this.onLlrpMessage);
     }
 
-    private handleMessage(msg: Buffer): void {
-        let packet;
-        try {
-            packet = parseRdmnetPacket(msg);
-        } catch {
-            return;
-        }
-        if (packet.vector !== RdmnetRootVector.Llrp) return;
-        if (packet.cid.equals(this.cid)) return; // ignore multicast loopback of our own send
-        let llrp: LlrpMessage;
-        try {
-            llrp = decodeLlrpMessage(packet.data);
-        } catch {
-            return;
-        }
-
+    private handleMessage(llrp: LlrpMessage, managerCid: Buffer): void {
         if (llrp.vector === LlrpVector.ProbeRequest) {
-            if (!llrp.destinationCid.equals(LLRP_BROADCAST_CID) && !llrp.destinationCid.equals(this.cid)) return;
+            if (!llrp.destinationCid.equals(LLRP_BROADCAST_CID) && !this.isAddressedToMe(llrp)) return;
+            if ((llrp.filter ?? 0) & LlrpFilter.BrokersOnly && this.componentType !== LlrpComponentType.Broker) return;
             const lower = uidFromBuffer(llrp.lowerUid);
             const upper = uidFromBuffer(llrp.upperUid);
             if (uidCompare(this.uid, lower) < 0 || uidCompare(this.uid, upper) > 0) return;
-            const known = (llrp.knownUids ?? []).map(uidFromBuffer);
+            const known = (llrp.knownUids ?? []).map((uid) => uidFromBuffer(uid));
             if (uidListIncludes(known, this.uid)) return;
 
             const backoffMs = Math.floor(Math.random() * LLRP_MAX_BACKOFF_MS);
+            const transactionNumber = llrp.transactionNumber;
             setTimeout(() => {
-                this.sendProbeReply(llrp.transactionNumber).catch(() => {
+                this.sendProbeReply(managerCid, transactionNumber).catch(() => {
                     // Best-effort reply; a failed send just means this round's probe misses us.
                 });
             }, backoffMs);
             return;
         }
 
-        if (llrp.vector === LlrpVector.RdmCommand && this.onRdmCommand) {
-            void Promise.resolve(this.onRdmCommand(llrp.rdm)).then((response) => {
-                if (!response) return;
-                return this.send(
-                    {vector: LlrpVector.RdmCommand, destinationCid: llrp.destinationCid, transactionNumber: llrp.transactionNumber, rdm: response},
-                    LLRP_MULTICAST_RESPONSE_GROUP,
-                );
-            }).catch(() => {
-                // Best-effort; drop malformed/failed responses rather than crash the listener.
-            });
+        // RDM commands must be addressed to this Target's own CID (never broadcast).
+        if (llrp.vector === LlrpVector.RdmCommand && this.onRdmCommand && this.isAddressedToMe(llrp)) {
+            const onRdmCommand = this.onRdmCommand;
+            void Promise.resolve()
+                .then(() => onRdmCommand(llrp.rdm))
+                .then((response) => {
+                    if (!response) return;
+                    return this.send(
+                        {
+                            vector: LlrpVector.RdmCommand,
+                            destinationCid: managerCid,
+                            transactionNumber: llrp.transactionNumber,
+                            rdm: response,
+                        },
+                        LLRP_MULTICAST_RESPONSE_GROUP,
+                    );
+                })
+                .catch(() => {
+                    // Best-effort; drop malformed/failed responses rather than crash the listener.
+                });
         }
     }
 
-    private async sendProbeReply(transactionNumber: number): Promise<void> {
+    private async sendProbeReply(managerCid: Buffer, transactionNumber: number): Promise<void> {
         await this.send(
             {
                 vector: LlrpVector.ProbeReply,
-                destinationCid: LLRP_BROADCAST_CID,
+                destinationCid: managerCid,
                 transactionNumber,
                 targetUid: uidToBuffer(this.uid),
                 hardwareAddress: this.hardwareAddress,

@@ -100,7 +100,7 @@ describe('sACN Packet', () => {
         expect(parsed.payloadAsBuffer?.[0]).toBe(10);
     });
 
-    it('truncates source name to 64 bytes', () => {
+    it('truncates source name to 63 bytes plus NUL terminator', () => {
         const longName = 'x'.repeat(90);
         const packet = new Packet({
             universe: 1,
@@ -110,8 +110,36 @@ describe('sACN Packet', () => {
         });
         const parsed = new Packet(packet.buffer);
 
-        expect(parsed.sourceName.length).toBe(64);
-        expect(parsed.sourceName).toBe('x'.repeat(64));
+        expect(parsed.sourceName.length).toBe(63);
+        expect(parsed.sourceName).toBe('x'.repeat(63));
+        expect(packet.buffer[44 + 63]).toBe(0);
+    });
+
+    it('round-trips UTF-8 source names without splitting characters', () => {
+        const packet = new Packet({universe: 1, payload: {}, sequence: 1, sourceName: 'Lichtpult ' + 'é'.repeat(40)});
+        const parsed = new Packet(packet.buffer);
+        expect(Buffer.byteLength(parsed.sourceName)).toBeLessThanOrEqual(63);
+        expect(parsed.sourceName.startsWith('Lichtpult éé')).toBe(true);
+        expect(parsed.sourceName).not.toContain('�');
+    });
+
+    it('accepts non-zero START codes and exposes option flags', () => {
+        const raw = new Packet({universe: 1, payload: Buffer.from([1, 2]), sequence: 1, options: 0x40 | 0x80}).buffer;
+        raw[125] = 0xdd;
+        const parsed = new Packet(raw);
+        expect(parsed.startCode).toBe(0xdd);
+        expect(parsed.isTerminated).toBe(true);
+        expect(parsed.isPreview).toBe(true);
+        expect(parsed.forceSynchronization).toBe(false);
+    });
+
+    it('rejects packets whose property value count exceeds the buffer', () => {
+        const raw = new Packet({universe: 1, payload: Buffer.from([1]), sequence: 1}).buffer.subarray(0, 200);
+        expect(() => new Packet(Buffer.from(raw))).toThrow(/truncated/);
+    });
+
+    it('rejects non-integer priority', () => {
+        expect(() => new Packet({universe: 1, payload: {}, sequence: 1, priority: 100.5})).toThrow(RangeError);
     });
 
     it('rejects invalid constructor inputs', () => {

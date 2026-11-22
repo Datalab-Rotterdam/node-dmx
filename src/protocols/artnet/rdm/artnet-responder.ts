@@ -13,6 +13,7 @@ import {ARTNET_ID, ARTNET_PORT, OpCode} from '../constants';
 import {buildArtPollReply, parseArtDmx, parseArtPoll} from '../packet';
 import {splitUniverseAddress} from '../util';
 import {buildArtRdm, buildArtTodData, parseArtRdm, parseArtTodControl, parseArtTodRequest} from './artnet-packets';
+import {RDM_START_CODE} from './constants';
 import type {RdmResponder} from './responder';
 
 export type ArtNetRdmResponderOptions = {
@@ -57,7 +58,9 @@ export class ArtNetRdmResponder extends EventEmitter<ArtNetRdmResponderEvents> {
             try {
                 this.handleMessage(msg, rinfo);
             } catch (err) {
-                this.emit('error', err as Error);
+                // Malformed packet or a throwing user hook: report only if
+                // someone listens, otherwise drop (never crash the process).
+                if (this.listenerCount('error') > 0) this.emit('error', err as Error);
             }
         });
         this.socket.on('error', (err) => this.emit('error', err));
@@ -98,21 +101,26 @@ export class ArtNetRdmResponder extends EventEmitter<ArtNetRdmResponderEvents> {
         const opcode = msg.readUInt16LE(8);
         if (opcode === OpCode.OpTodRequest) {
             const request = parseArtTodRequest(msg);
-            if (request && this.wantsOurUniverse(request.addCount, request.addresses)) {
+            if (request && this.wantsOurUniverse(request.net, request.addCount, request.addresses)) {
                 this.replyTod(rinfo);
             }
             return;
         }
 
         if (opcode === OpCode.OpTodControl) {
-            if (parseArtTodControl(msg)) this.replyTod(rinfo);
+            const control = parseArtTodControl(msg);
+            if (control && this.isOurPortAddress(control.net, control.address)) this.replyTod(rinfo);
             return;
         }
 
         if (opcode === OpCode.OpRdm) {
             const request = parseArtRdm(msg);
-            if (!request) return;
-            const replyFrame = this.options.responder.respond(request.rdmPacket);
+            if (!request || !this.isOurPortAddress(request.net, request.address)) return;
+            const rawReply = this.options.responder.respond(request.rdmPacket);
+            // Only standard 0xCC-framed replies can be carried in ArtRdm; a
+            // DISC_UNIQUE_BRANCH answer (preamble-framed) is not valid over
+            // Art-Net (nodes run discovery themselves and report via ArtTodData).
+            const replyFrame = rawReply && rawReply[0] === RDM_START_CODE ? rawReply : null;
             if (replyFrame) {
                 const packet = buildArtRdm({universe: this.options.universe, rdmPacket: replyFrame.subarray(1)});
                 this.send(packet, rinfo);
@@ -121,10 +129,25 @@ export class ArtNetRdmResponder extends EventEmitter<ArtNetRdmResponderEvents> {
         }
     }
 
-    private wantsOurUniverse(addCount: number, addresses: number[]): boolean {
+    /**
+     * True when Net + SubUni form our full 15-bit Port-Address (Art-Net 4:
+     * Net is bits 14-8, SubUni bits 7-0).
+     */
+    private isOurPortAddress(net: number, subUni: number): boolean {
+        const ours = splitUniverseAddress(this.options.universe);
+        return (net & 0x7f) === ours.net && subUni === ours.subUni;
+    }
+
+    /**
+     * ArtTodRequest addressing: the Net field must match ours and one of the
+     * `addCount` Address bytes must be our SubUni. `addCount === 0` is treated
+     * leniently as "every port in this Net".
+     */
+    private wantsOurUniverse(net: number, addCount: number, addresses: number[]): boolean {
+        const ours = splitUniverseAddress(this.options.universe);
+        if ((net & 0x7f) !== ours.net) return false;
         if (addCount === 0) return true;
-        const {subUni} = splitUniverseAddress(this.options.universe);
-        return addresses.includes(subUni);
+        return addresses.includes(ours.subUni);
     }
 
     private replyPoll(rinfo: {address: string; port: number}): void {

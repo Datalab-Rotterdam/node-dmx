@@ -33,6 +33,7 @@ has no runtime dependencies.
   - [Finding Art-Net nodes](#finding-art-net-nodes)
   - [RDM over Art-Net](#rdm-over-art-net)
   - [Simulating a fixture](#simulating-a-fixture)
+  - [Testing without lights](#testing-without-lights)
   - [Fixtures](#fixtures)
 - [Controller options](#controller-options)
 - [Protocol support](#protocol-support)
@@ -213,6 +214,21 @@ fixture.on('dmx', (frame) => console.log('levels', frame.subarray(0, 3)));
 
 The same responder also works over RDMnet (`RdmnetClient.useRdmResponder(responder)`)
 and LLRP (`new LlrpTarget({..., onRdmCommand: (frame) => responder.respond(frame)})`).
+
+### Testing without lights
+[node-dmx-simulator](https://github.com/Datalab-Rotterdam/node-dmx-simulator)
+is a stage full of virtual fixtures on your network: it receives sACN and
+Art-Net, answers discovery and RDM, and shows the result in your browser.
+
+![node-dmx-simulator in a browser: LED bars, pars and moving heads lit by sACN](https://raw.githubusercontent.com/Datalab-Rotterdam/node-dmx-simulator/main/docs/demo.gif)
+
+```bash
+npx node-dmx-simulator       # then open http://localhost:8080
+npm run example/sacn-rainbow # in a second terminal
+```
+
+Drag fixtures around, change their patch, or start from a bundled rig
+(`--rig classroom`).
 
 ### Fixtures
 Fixture plugins let you set a fixture with values like colours and dimmer

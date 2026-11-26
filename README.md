@@ -220,7 +220,7 @@ and LLRP (`new LlrpTarget({..., onRdmCommand: (frame) => responder.respond(frame
 is a stage full of virtual fixtures on your network: it receives sACN and
 Art-Net, answers discovery and RDM, and shows the result in your browser.
 
-![node-dmx-simulator in a browser: LED bars, pars and moving heads lit by sACN](https://raw.githubusercontent.com/Datalab-Rotterdam/node-dmx-simulator/main/docs/demo.gif)
+https://github.com/user-attachments/assets/17b407be-d308-4b54-a22c-32763208ffd2
 
 ```bash
 npx node-dmx-simulator       # then open http://localhost:8080
